@@ -255,6 +255,11 @@ and in English.
 
 **Twelve modes, not just questions.** Asking a question retrieves the best passages. Every other mode reads the whole document and needs no typing at all: summarise, key points, outline with timestamps, action items, extract to a table, flashcards, quiz, explain simply, translate, fact-check a claim, or rewrite as a blog post. Adding one is a single entry in `backend/app/services/modes.py`.
 
+**The answering model is visible.** Which pool member is replying is named
+under the answer and pinned beside the composer, live while it types rather
+than only once it has finished. Conversations are assigned a model, so that
+label is stable between turns and makes failover legible when it happens.
+
 **Collections.** Group sources and ask one question across all of them. Each index is searched in parallel and the results merged, with every citation labelled by which source it came from.
 
 ### Modes
@@ -413,7 +418,15 @@ Add one `ModeSpec` to `backend/app/services/modes.py`. Set `scope` to `retrieval
 | GET | `/api/v1/conversations/{id}/messages` | history |
 | POST | `/api/v1/conversations/{id}/messages` | `{content, mode}`, streams SSE |
 
-The message stream emits `citations`, `progress`, `model`, `token`, then `done` or `error`. Interactive docs are at http://localhost:8000/docs.
+The message stream emits `citations`, `progress`, `model`, `token`, then `done` or `error`.
+
+Stopping an answer aborts the request. The server notices the client has gone
+and abandons the generation, so nothing further is spent and nothing is saved:
+a stopped answer stays on screen marked incomplete, with a Retry button, but
+disappears on reload because it was never persisted. The client also stops
+consuming events the moment it aborts, since cancelling a stream resolves
+pending reads rather than raising, and without that check buffered tokens keep
+arriving for a moment after the button is pressed. Interactive docs are at http://localhost:8000/docs.
 
 ## Configuration
 
@@ -462,7 +475,7 @@ The suite never touches the network. It uses deterministic fake embeddings, scri
 
 ## Notes and limits
 
-- **No authentication.** Every source and conversation is global, so anyone who can reach the API sees everything. That is fine for a local tool and wrong for anything exposed. Authentication and per-user data would need to come first, and nothing in the schema has a user column yet.
+- **No authentication, and therefore no private history.** Every source and conversation is global. Nothing is stored in the browser except the light or dark preference, so opening the app in a private window, in another browser, or on another device shows the same sources and the same chat history: there is no identity to separate them by. That is fine for a local tool and wrong for anything exposed. Authentication and per-user data would have to come first, and nothing in the schema has a user column yet.
 - **YouTube blocks caption requests from many data-centre IP ranges.** Run the backend from a home network for YouTube sources.
 - **Answers inherit transcription errors.** The chain is only as accurate as the captions or the speech recognition beneath it. Testing Arabic audio, Whisper heard "one hundred thousand" where the speaker said "two hundred thousand", and the answer faithfully repeated the transcript. That is the system working as designed, staying grounded rather than guessing, but numbers and proper nouns in non-English speech deserve a check against the source.
 - **Podcast pages are not supported directly.** Spotify and Apple pages do not expose an audio URL. Use a direct audio link or upload the file.

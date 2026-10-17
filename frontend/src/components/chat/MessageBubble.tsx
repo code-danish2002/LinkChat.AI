@@ -78,9 +78,14 @@ export function MessageBubble({
           </div>
         )}
         {!waiting && <Citations citations={message.citations} highlight={highlight} />}
-        {message.model && !message.streaming && (
-          <p className="mt-2 text-[11px] text-slate-400 dark:text-slate-500">
-            answered by {modelLabel(message.model)}
+        {/* Shown as soon as the model is known, not only once it has finished,
+            so you can see which one is answering while it types. */}
+        {message.model && (
+          <p className="mt-2 flex items-center gap-1 text-[11px] text-slate-400 dark:text-slate-500">
+            {message.streaming && (
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+            )}
+            {message.streaming ? "answering with" : "answered by"} {modelLabel(message.model)}
           </p>
         )}
       </div>

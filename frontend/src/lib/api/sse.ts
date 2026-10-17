@@ -18,8 +18,9 @@ export async function* readSse(response: Response, signal?: AbortSignal): AsyncG
 
   try {
     while (true) {
+      if (signal?.aborted) break;
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done || signal?.aborted) break;
       buffer += decoder.decode(value, { stream: true });
 
       let boundary = buffer.indexOf("\n\n");
@@ -27,10 +28,14 @@ export async function* readSse(response: Response, signal?: AbortSignal): AsyncG
         const block = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
         const message = parseBlock(block);
-        if (message) yield message;
+        if (message) {
+          if (signal?.aborted) return;
+          yield message;
+        }
         boundary = buffer.indexOf("\n\n");
       }
     }
+    if (signal?.aborted) return;
     const tail = parseBlock(buffer);
     if (tail) yield tail;
   } finally {

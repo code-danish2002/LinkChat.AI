@@ -2,12 +2,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+
+
 import { Composer } from "@/components/chat/Composer";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { ModeBar, modeIcon } from "@/components/chat/ModeBar";
 import { Icon } from "@/components/ui/Icon";
 import { useChat } from "@/hooks/useChat";
 import type { ChatModeId, Mode, SourceKind } from "@/lib/api/types";
+import { modelLabel } from "@/lib/format";
 
 const QA: Mode = {
   id: "qa",
@@ -55,6 +58,15 @@ export function ChatPanel({
     [catalogue, activeId],
   );
   const live = ready && conversationId !== null;
+  // The model this conversation is on, kept visible between turns rather than
+  // only appearing under a finished answer.
+  const currentModel = useMemo(() => {
+    for (let i = chat.messages.length - 1; i >= 0; i -= 1) {
+      const model = chat.messages[i].model;
+      if (model) return model;
+    }
+    return null;
+  }, [chat.messages]);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -134,10 +146,21 @@ export function ChatPanel({
           onSend={(text) => void chat.send(text, active.id, active.default_prompt)}
           onStop={chat.stop}
         />
-        <p className="text-center text-[11px] text-slate-400">
-          {active.needs_input
-            ? "Enter to send · Shift+Enter for a new line"
-            : `${active.description} Press Run, or add an instruction first.`}
+        <p className="flex items-center justify-center gap-2 text-center text-[11px] text-slate-400">
+          {currentModel && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+              title={`This conversation is answered by ${currentModel}. The pool picks another if it fails.`}
+            >
+              <Icon name="sparkles" className="h-3 w-3 text-indigo-500" />
+              {modelLabel(currentModel)}
+            </span>
+          )}
+          <span>
+            {active.needs_input
+              ? "Enter to send · Shift+Enter for a new line"
+              : `${active.description} Press Run, or add an instruction first.`}
+          </span>
         </p>
       </div>
     </section>

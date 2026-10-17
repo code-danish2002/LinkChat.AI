@@ -80,6 +80,10 @@ export function useChat(conversationId: string | null) {
 
       try {
         for await (const event of api.conversations.send(conversationId, text, mode, controller.signal)) {
+          // Cancelling the stream resolves pending reads rather than throwing,
+          // so without this check already-buffered tokens keep being appended
+          // for a moment after Stop is pressed.
+          if (controller.signal.aborted) break;
           switch (event.type) {
             case "citations":
               patch(assistantId, { citations: event.data });
@@ -121,15 +125,18 @@ export function useChat(conversationId: string | null) {
               : "The answer could not be streamed.";
         patch(assistantId, { streaming: false, progress: null, error: message });
       } finally {
+        const stopped = controller.signal.aborted;
         abortRef.current = null;
         setState((s) => ({
           ...s,
           streaming: false,
-          messages: s.messages.map((m) =>
-            m.id === assistantId && m.streaming
-              ? { ...m, streaming: false, progress: null, error: m.error ?? (failed ? "Interrupted." : null) }
-              : m,
-          ),
+          messages: s.messages.map((m) => {
+            if (m.id !== assistantId || !m.streaming) return m;
+            // Say why the answer is cut short. Without this a stopped answer
+            // looks like the model simply trailed off mid-sentence.
+            const reason = stopped ? "Stopped. The answer is incomplete." : failed ? "Interrupted." : null;
+            return { ...m, streaming: false, progress: null, error: m.error ?? reason };
+          }),
         }));
       }
     },
