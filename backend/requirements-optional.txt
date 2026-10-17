@@ -1,0 +1,5 @@
+# JavaScript rendering fallback for single-page apps and shops.
+# After installing, download the browser binary once:
+#     playwright install chromium
+# Then set BROWSER_FALLBACK_ENABLED=true in backend/.env
+playwright>=1.45,<2

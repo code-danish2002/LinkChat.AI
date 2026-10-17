@@ -1,0 +1,241 @@
+# LinkChat model pool.
+#
+# Every provider below exposes an OpenAI-compatible /chat/completions
+# endpoint, so one client talks to all of them. A provider is only *active*
+# when its api_key_env is set (or, for opt_in_env providers, when that env
+# var is truthy). Models are tried in ascending `priority`; a model that
+# fails trips its circuit breaker and the next one takes over.
+#
+# Edit freely: model IDs on hosted providers change over time. Adding a
+# model is one entry here, no code changes.
+
+providers:
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+  cerebras:
+    base_url: https://api.cerebras.ai/v1
+    api_key_env: CEREBRAS_API_KEY
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    extra_headers:
+      HTTP-Referer: http://localhost:3000
+      X-Title: LinkChat
+  together:
+    base_url: https://api.together.xyz/v1
+    api_key_env: TOGETHER_API_KEY
+  huggingface:
+    base_url: https://router.huggingface.co/v1
+    api_key_env: HF_TOKEN
+  # Google AI Studio, OpenAI-compatible path. Serves Gemma, which is Google's
+  # open-weight family. Gemini is also reachable here but has no open weights,
+  # so it is left out of the pool below; add it yourself if you want it.
+  google:
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key_env: GOOGLE_API_KEY
+  # Mistral's own platform. Their small models are Apache-licensed open weights.
+  mistral:
+    base_url: https://api.mistral.ai/v1
+    api_key_env: MISTRAL_API_KEY
+  # Ollama's hosted service. Key-based, nothing to download. Distinct from the
+  # `ollama` provider below, which is the local server on your own machine.
+  ollama_cloud:
+    base_url: https://ollama.com/v1
+    api_key_env: OLLAMA_API_KEY
+  ollama:
+    base_url: http://localhost:11434/v1
+    base_url_env: OLLAMA_BASE_URL
+    opt_in_env: OLLAMA_ENABLED
+    api_key_env: null
+
+models:
+  # ---- Groq (fast, free tier) ----
+  # Groq rotates its catalogue; check https://console.groq.com/docs/models
+  - provider: groq
+    model: openai/gpt-oss-120b
+    display_name: GPT-OSS 120B
+    priority: 10
+  - provider: groq
+    model: qwen/qwen3.8-27b
+    display_name: Qwen 3.8 27B
+    priority: 11
+  - provider: groq
+    model: openai/gpt-oss-20b
+    display_name: GPT-OSS 20B
+    priority: 12
+
+  # ---- Cerebras (very fast, free tier) ----
+  - provider: cerebras
+    model: llama-3.3-70b
+    display_name: Llama 3.3 70B (Cerebras)
+    priority: 20
+  - provider: cerebras
+    model: gpt-oss-120b
+    display_name: GPT-OSS 120B (Cerebras)
+    priority: 21
+  - provider: cerebras
+    model: qwen-3-32b
+    display_name: Qwen3 32B (Cerebras)
+    priority: 22
+  - provider: cerebras
+    model: llama3.1-8b
+    display_name: Llama 3.1 8B (Cerebras)
+    priority: 23
+
+  # ---- OpenRouter free open-weight models ----
+  # Every entry streamed a real completion on 2026-10-17. Removed because this
+  # account cannot use them: thinkingmachines/inkling(-small):free (403, gated),
+  # nvidia/nemotron-3-ultra-550b-a55b:free (404, no provider serving it),
+  # google/gemma-4-31b-it:free and gemma-4-26b-a4b-it:free (persistent 429),
+  # nemotron-3-nano-omni-30b-a3b-reasoning:free (answered once, then stopped),
+  # nemotron-3.5-super-vl:free (502 on a real request).
+  - provider: openrouter
+    model: nvidia/nemotron-3-super-120b-a12b:free
+    display_name: Nemotron 3 Super 120B
+    priority: 30
+  - provider: openrouter
+    model: nvidia/nemotron-3.5-lightning:free
+    display_name: Nemotron 3.5 Lightning
+    priority: 32
+    bulk: false  # 11.2s per request: fine for answers, too slow for condensing
+  - provider: openrouter
+    model: cohere/north-mini-code:free
+    display_name: North Mini Code
+    priority: 34
+  - provider: openrouter
+    model: liquid/lfm-2.5-2.6b:free
+    display_name: LFM 2.5 2.6B
+    priority: 35
+  - provider: openrouter
+    model: openrouter/free
+    display_name: OpenRouter Free Router
+    priority: 36
+    bulk: false  # 8.9s per request: fine for answers, too slow for condensing
+
+  # ---- Google AI Studio (Gemma, open weights) ----
+  # Endpoint confirmed OpenAI-compatible on 2026-10-17; model ids NOT yet
+  # verified against the live catalogue, so run `make verify-models` after
+  # adding GOOGLE_API_KEY and fix any that come back as not served.
+  - provider: google
+    model: gemma-3-27b-it
+    display_name: Gemma 3 27B (Google)
+    priority: 38
+  - provider: google
+    model: gemma-3-12b-it
+    display_name: Gemma 3 12B (Google)
+    priority: 39
+
+  # ---- Mistral (Apache-licensed open weights) ----
+  # Same caveat: verify the ids once MISTRAL_API_KEY is set.
+  - provider: mistral
+    model: mistral-small-latest
+    display_name: Mistral Small
+    priority: 44
+  - provider: mistral
+    model: open-mistral-nemo
+    display_name: Mistral Nemo
+    priority: 45
+
+  # ---- Together ----
+  - provider: together
+    model: meta-llama/Llama-3.3-70B-Instruct-Turbo
+    display_name: Llama 3.3 70B (Together)
+    priority: 40
+  - provider: together
+    model: Qwen/Qwen2.5-72B-Instruct-Turbo
+    display_name: Qwen2.5 72B (Together)
+    priority: 41
+  - provider: together
+    model: mistralai/Mixtral-8x7B-Instruct-v0.1
+    display_name: Mixtral 8x7B (Together)
+    priority: 42
+
+  # ---- Hugging Face Inference Providers ----
+  # Verified served on 2026-10-14, but NOT usable without buying credits: with a
+  # valid fine-grained token the chat endpoint answers
+  #   402 You have no remaining credits
+  # There is no free inference allowance on a new account. Leave HF_TOKEN blank
+  # unless you have purchased credit, so the router does not waste a round trip
+  # discovering this once an hour. The entries stay here, ready if you do.
+  - provider: huggingface
+    model: meta-llama/Llama-3.3-70B-Instruct
+    display_name: Llama 3.3 70B (Hugging Face)
+    priority: 50
+  - provider: huggingface
+    model: deepseek-ai/DeepSeek-V3.1
+    display_name: DeepSeek V3.1 (Hugging Face)
+    priority: 51
+  - provider: huggingface
+    model: Qwen/Qwen3.8-27B
+    display_name: Qwen 3.8 27B (Hugging Face)
+    priority: 52
+  - provider: huggingface
+    model: google/gemma-4-31B-it
+    display_name: Gemma 4 31B (Hugging Face)
+    priority: 53
+  - provider: huggingface
+    model: meta-llama/Llama-3.1-8B-Instruct
+    display_name: Llama 3.1 8B (Hugging Face)
+    priority: 54
+
+  # ---- Ollama Cloud (hosted, no download) ----
+  # Only the Free-plan models are listed; every one streamed a real completion
+  # on 2026-10-17. The Pro-only models (deepseek-v4-*, kimi-*, glm-5.*,
+  # minimax-*, mistral-large-*, muse-spark-open) answer 402 without a paid plan.
+  # Dropped: nemotron-3-nano:30b took 13s and returned nothing usable.
+  - provider: ollama_cloud
+    model: nemotron-3-ultra
+    display_name: Nemotron 3 Ultra (Ollama Cloud)
+    priority: 60
+    bulk: false  # 8.5s per request: fine for answers, too slow for condensing
+  - provider: ollama_cloud
+    model: nemotron-3-super
+    display_name: Nemotron 3 Super (Ollama Cloud)
+    priority: 61
+  - provider: ollama_cloud
+    model: gpt-oss:120b
+    display_name: GPT-OSS 120B (Ollama Cloud)
+    priority: 62
+  - provider: ollama_cloud
+    model: gemma4:31b
+    display_name: Gemma 4 31B (Ollama Cloud)
+    priority: 63
+  - provider: ollama_cloud
+    model: gpt-oss:20b
+    display_name: GPT-OSS 20B (Ollama Cloud)
+    priority: 65
+  - provider: ollama_cloud
+    model: beam
+    display_name: Beam (Ollama Cloud)
+    priority: 66
+
+  # ---- Ollama (fully local, last resort) ----
+  - provider: ollama
+    model: llama3.1:8b
+    display_name: Llama 3.1 8B (local)
+    priority: 90
+  - provider: ollama
+    model: qwen2.5:7b
+    display_name: Qwen2.5 7B (local)
+    priority: 91
+  - provider: ollama
+    model: mistral:7b
+    display_name: Mistral 7B (local)
+    priority: 92
+  - provider: ollama
+    model: gemma2:9b
+    display_name: Gemma 2 9B (local)
+    priority: 93
+
+# Speech-to-text pool for audio sources. Same provider credentials, same
+# first-one-that-works failover.
+transcription:
+  - provider: groq
+    model: whisper-large-v3-turbo
+    display_name: Whisper Large v3 Turbo
+    priority: 10
+  - provider: groq
+    model: whisper-large-v3
+    display_name: Whisper Large v3
+    priority: 11

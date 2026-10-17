@@ -1,0 +1,18 @@
+[project]
+name = "linkchat-backend"
+version = "1.0.0"
+description = "LinkChat API: paste a URL, chat with its content using open-source models with automatic failover."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+# B008: FastAPI's Depends() in defaults is the idiomatic pattern.
+ignore = ["B008"]

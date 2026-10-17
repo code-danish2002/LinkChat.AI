@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+backend/data/
+backend/.env
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.next/
+out/
+frontend/.env.local
+npm-debug.log*
+
+# Secrets: catch any .env anywhere, while keeping the committed templates
+.env
+.env.*
+!.env.example
+!*/.env.example
+
+# Build output
+.next/standalone/
+*.tsbuildinfo
+next-env.d.ts
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
