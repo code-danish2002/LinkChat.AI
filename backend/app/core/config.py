@@ -68,9 +68,14 @@ class Settings(BaseSettings):
     # ---- email (login codes) ----
     # console: print the code to the server log (development).
     # resend:  send through https://resend.com (free tier, needs RESEND_API_KEY).
+    # smtp:    any mailbox with SMTP access (Gmail app password, Brevo relay, Zoho).
     email_provider: str = "console"
     resend_api_key: str = ""
     email_from: str = "LinkChat <onboarding@resend.dev>"
+    smtp_host: str = ""
+    smtp_port: int = 587  # 587 = STARTTLS, 465 = implicit TLS; 25 is blocked on most hosts
+    smtp_username: str = ""
+    smtp_password: str = ""
 
     # ---- ingestion ----
     fetch_timeout_seconds: float = 25.0

@@ -138,7 +138,14 @@ class Container:
 
         # ---- identity ----
         email = build_email_sender(
-            settings.email_provider, http, api_key=settings.resend_api_key, sender=settings.email_from
+            settings.email_provider,
+            http,
+            api_key=settings.resend_api_key,
+            sender=settings.email_from,
+            smtp_host=settings.smtp_host,
+            smtp_port=settings.smtp_port,
+            smtp_username=settings.smtp_username,
+            smtp_password=settings.smtp_password,
         )
         auth = AuthService(
             identity_repo,
