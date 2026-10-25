@@ -4,11 +4,11 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - ./backend/.env
+      - ./backend/.env            # must contain DATABASE_URL (Postgres with pgvector) and provider keys
     environment:
       CORS_ORIGINS: http://localhost:3000
     volumes:
-      - backend-data:/app/data
+      - backend-data:/app/data    # embedding model cache and in-flight uploads only
     restart: unless-stopped
 
   frontend:

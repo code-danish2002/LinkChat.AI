@@ -25,13 +25,13 @@ class Chunker:
 
     # ---- public ----
 
-    def chunk(self, document: LoadedDocument, source_id: str) -> list[Chunk]:
+    def chunk(self, document: LoadedDocument, document_id: str) -> list[Chunk]:
         if document.is_timed:
             pieces = self._split_timed(document.segments)
         else:
             pieces = [(piece, {}) for piece in self.split_text(document.text)]
         return [
-            Chunk(id=new_id("chk"), source_id=source_id, index=i, text=text, metadata=meta)
+            Chunk(id=new_id("chk"), document_id=document_id, index=i, text=text, metadata=meta)
             for i, (text, meta) in enumerate(pieces)
             if text.strip()
         ]

@@ -10,6 +10,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY app ./app
 COPY config ./config
+COPY db ./db
 
 VOLUME ["/app/data"]
 EXPOSE 8000

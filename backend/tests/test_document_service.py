@@ -49,7 +49,7 @@ def make_router(client) -> ModelRouter:
 
 def make_chunks(count: int, size: int = 400) -> list[Chunk]:
     return [
-        Chunk(id=new_id("chk"), source_id="src_1", index=i, text=f"part {i} " + "word " * (size // 5))
+        Chunk(id=new_id("chk"), document_id="doc_1", index=i, text=f"part {i} " + "word " * (size // 5))
         for i in range(count)
     ]
 

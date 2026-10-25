@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { AccountMenu } from "@/components/auth/AccountMenu";
 import { Icon } from "@/components/ui/Icon";
 
 export function AppShell({ children, right }: { children: ReactNode; right?: ReactNode }) {
@@ -14,7 +15,10 @@ export function AppShell({ children, right }: { children: ReactNode; right?: Rea
             </span>
             <span>LinkChat</span>
           </Link>
-          <div className="flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">{right}</div>
+          <div className="flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
+            {right}
+            <AccountMenu />
+          </div>
         </div>
       </header>
       <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 sm:px-6">{children}</main>

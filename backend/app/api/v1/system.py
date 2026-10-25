@@ -26,16 +26,21 @@ def _capabilities(container: Container) -> CapabilitiesResponse:
         collections=True,
         upload_extensions=list(SUPPORTED_UPLOAD_EXTENSIONS),
         max_upload_mb=container.settings.max_upload_bytes // (1024 * 1024),
+        email_login=container.auth.email_provider,
+        guest_ttl_hours=container.settings.guest_ttl_hours,
+        session_ttl_hours=container.settings.session_ttl_hours,
     )
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health(container: Container = Depends(get_container)):
+    database_ok = await container.db.ping() if container.db is not None else True
     return HealthResponse(
-        status="ok",
+        status="ok" if database_ok else "degraded",
         version=container.settings.app_version,
         embedding_model=container.embeddings.model_name,
         active_models=container.router.active_count(),
+        database="ok" if database_ok else "unreachable",
         supported_sources=container.resolver.kinds,
         capabilities=_capabilities(container),
     )

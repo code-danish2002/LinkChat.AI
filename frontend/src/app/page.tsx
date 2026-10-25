@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 
+import { GuestNotice } from "@/components/auth/GuestNotice";
 import { CollectionList } from "@/components/collections/CollectionList";
 import { AppShell } from "@/components/layout/AppShell";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
@@ -44,6 +45,7 @@ export default function HomePage() {
               router.push(`/s/${source.id}`);
             }}
           />
+          <GuestNotice />
         </div>
         <ul className="mt-10 grid gap-4 text-left sm:grid-cols-2 lg:grid-cols-4">
           {FEATURES.map((feature) => (

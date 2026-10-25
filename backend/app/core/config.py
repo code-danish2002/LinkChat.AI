@@ -37,8 +37,40 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
 
     # ---- paths ----
+    # Local disk holds only what is transient or re-downloadable: the embedding
+    # model cache and uploaded files while they are being ingested. Everything
+    # a user would miss lives in Postgres.
     data_dir: Path = BACKEND_DIR / "data"
     models_config_path: Path = BACKEND_DIR / "config" / "models.yaml"
+    schema_path: Path = BACKEND_DIR / "db" / "schema.postgres.sql"
+
+    # ---- database ----
+    # Postgres with the pgvector extension (Neon's free tier works). The
+    # pooled connection string is the right one for a web server.
+    database_url: str = ""
+    db_pool_min: int = 1
+    db_pool_max: int = 5
+    # Neon suspends idle databases; dropping idle connections sooner than that
+    # avoids handing a dead socket to the next request.
+    db_pool_max_idle_seconds: float = 240.0
+
+    # ---- identity ----
+    # Guests are a browser-generated id; their data lives this long after their
+    # last request. Users sign in with an emailed code; a session lasts this long
+    # and is extended on use.
+    auth_secret: str = ""  # HMAC key for hashing codes and tokens; required in production
+    guest_ttl_hours: int = 24
+    session_ttl_hours: int = 24 * 7
+    login_code_ttl_minutes: int = 10
+    login_code_max_attempts: int = 5
+    cleanup_interval_minutes: int = 60
+
+    # ---- email (login codes) ----
+    # console: print the code to the server log (development).
+    # resend:  send through https://resend.com (free tier, needs RESEND_API_KEY).
+    email_provider: str = "console"
+    resend_api_key: str = ""
+    email_from: str = "LinkChat <onboarding@resend.dev>"
 
     # ---- ingestion ----
     fetch_timeout_seconds: float = 25.0
@@ -108,6 +140,8 @@ class Settings(BaseSettings):
     rate_limit_chat_per_minute: int = 20
     rate_limit_ingest_per_minute: int = 10
     rate_limit_general_per_minute: int = 120
+    # Sending a login code costs an email, so this bucket is tight.
+    rate_limit_auth_per_minute: int = 5
 
     # ---- collections ----
     collection_per_source_k: int = 4
@@ -141,14 +175,6 @@ class Settings(BaseSettings):
     @property
     def embedding_model_list(self) -> list[str]:
         return _split_csv(self.embedding_models)
-
-    @property
-    def vector_dir(self) -> Path:
-        return self.data_dir / "vectors"
-
-    @property
-    def db_path(self) -> Path:
-        return self.data_dir / "linkchat.sqlite3"
 
     @property
     def embedding_cache_dir(self) -> Path:

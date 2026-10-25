@@ -7,9 +7,83 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.domain.models import ChatMode, Citation, Collection, Conversation, Message, Source
+from app.domain.models import (
+    ChatMode,
+    Citation,
+    Collection,
+    Conversation,
+    Message,
+    Principal,
+    Session,
+    Source,
+    User,
+)
 from app.providers.llm.router import ModelStatus
 from app.services.modes import ModeSpec
+
+# ---------------------------------------------------------------- auth
+
+
+class RequestCodeRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    display_name: str | None = Field(default=None, max_length=80)
+
+
+class RequestCodeResponse(BaseModel):
+    sent: bool
+    email: str
+    expires_at: datetime
+    delivery: str
+    #: Present only when the server logs codes instead of emailing them (local development).
+    debug_code: str | None = None
+
+
+class VerifyCodeRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    code: str = Field(..., min_length=6, max_length=6)
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    display_name: str
+    created_at: datetime
+
+    @classmethod
+    def from_domain(cls, user: User) -> UserResponse:
+        return cls(id=user.id, email=user.email, display_name=user.display_name, created_at=user.created_at)
+
+
+class SessionResponse(BaseModel):
+    token: str
+    expires_at: datetime
+    user: UserResponse
+
+    @classmethod
+    def build(cls, token: str, session: Session, user: User) -> SessionResponse:
+        return cls(token=token, expires_at=session.expires_at, user=UserResponse.from_domain(user))
+
+
+class MeResponse(BaseModel):
+    kind: str  # guest | user
+    owner_id: str
+    user: UserResponse | None
+    session_expires_at: datetime | None
+    #: For guests: how long after their last request their data is deleted.
+    guest_ttl_hours: int
+
+    @classmethod
+    def from_principal(cls, principal: Principal, *, guest_ttl_hours: int) -> MeResponse:
+        return cls(
+            kind=principal.kind.value,
+            owner_id=principal.owner_id,
+            user=UserResponse.from_domain(principal.user) if principal.user else None,
+            session_expires_at=principal.session.expires_at if principal.session else None,
+            guest_ttl_hours=guest_ttl_hours,
+        )
+
+
+# ---------------------------------------------------------------- sources
 
 
 class CreateSourceRequest(BaseModel):
@@ -23,6 +97,7 @@ class CreateSourceRequest(BaseModel):
 
 class SourceResponse(BaseModel):
     id: str
+    document_id: str
     url: str
     kind: str
     title: str
@@ -37,6 +112,7 @@ class SourceResponse(BaseModel):
     def from_domain(cls, source: Source) -> SourceResponse:
         return cls(
             id=source.id,
+            document_id=source.document_id,
             url=source.url,
             kind=source.kind.value,
             title=source.title,
@@ -211,6 +287,10 @@ class CapabilitiesResponse(BaseModel):
     collections: bool
     upload_extensions: list[str]
     max_upload_mb: int
+    #: How login codes are delivered: "resend" means real email, "console" means the server log.
+    email_login: str
+    guest_ttl_hours: int
+    session_ttl_hours: int
 
 
 class HealthResponse(BaseModel):
@@ -218,6 +298,7 @@ class HealthResponse(BaseModel):
     version: str
     embedding_model: str
     active_models: int
+    database: str  # ok | unreachable
     supported_sources: list[str]
     capabilities: CapabilitiesResponse
 

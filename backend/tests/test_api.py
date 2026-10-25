@@ -1,8 +1,10 @@
-"""End-to-end API tests with fake embeddings and a fake model pool (no network)."""
+"""End-to-end API tests with fake embeddings, an in-memory database and a fake model pool."""
 
 from __future__ import annotations
 
+import json
 import time
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -15,22 +17,33 @@ from app.ingestion.processor import PayloadProcessor
 from app.ingestion.resolver import SourceResolver
 from app.ingestion.upload import UploadLoader, UploadStore
 from app.main import create_app
+from app.providers.email.senders import ConsoleEmailSender
 from app.providers.llm.health import BreakerRegistry
 from app.providers.llm.registry import ModelRegistry, ModelSpec, ProviderSpec
 from app.providers.llm.router import ModelRouter
+from app.services.auth_service import AuthService
 from app.services.chat_service import ChatService
 from app.services.collection_service import CollectionService
 from app.services.document_service import DocumentService
 from app.services.ingestion_service import IngestionService
+from app.services.maintenance import MaintenanceService
 from app.services.retrieval_service import RetrievalService
-from app.storage.db.sqlite import (
-    Database,
-    SqliteCollectionRepository,
-    SqliteConversationRepository,
-    SqliteSourceRepository,
+from tests.fakes import (
+    EchoLLMClient,
+    FakeLoader,
+    FakeTranscriber,
+    HashEmbeddings,
+    MemoryCollectionRepository,
+    MemoryConversationRepository,
+    MemoryDocumentRepository,
+    MemoryIdentityRepository,
+    MemorySourceRepository,
+    MemoryStore,
+    MemoryVectorStore,
 )
-from app.storage.vector.local_store import LocalHybridVectorStore
-from tests.fakes import EchoLLMClient, FakeLoader, FakeTranscriber, HashEmbeddings
+
+GUEST_A = "gst_test_guest_aaaa"
+GUEST_B = "gst_test_guest_bbbb"
 
 
 @pytest.fixture
@@ -46,18 +59,22 @@ def harness(tmp_path, monkeypatch):
         chunk_overlap=50,
     )
     client_double = EchoLLMClient()
+    store = MemoryStore()
+    loader = FakeLoader(sections=60)
+    email = ConsoleEmailSender()
 
     def build(_settings):
         embeddings = HashEmbeddings()
-        db = Database(tmp_path / "db.sqlite3")
-        sources_repo = SqliteSourceRepository(db)
-        conversations_repo = SqliteConversationRepository(db)
-        collections_repo = SqliteCollectionRepository(db)
-        store = LocalHybridVectorStore(tmp_path / "vectors", embedding_model=embeddings.model_name)
+        documents_repo = MemoryDocumentRepository(store)
+        sources_repo = MemorySourceRepository(store)
+        conversations_repo = MemoryConversationRepository(store)
+        collections_repo = MemoryCollectionRepository(store)
+        identity_repo = MemoryIdentityRepository(store)
+        vector_store = MemoryVectorStore(store, embedding_model=embeddings.model_name)
         processor = PayloadProcessor(transcriber=FakeTranscriber(), min_chars=10)
         uploads = UploadStore(tmp_path / "uploads")
         # 60 sections render to well over the 400-token window, so modes take several passes.
-        resolver = SourceResolver([FakeLoader(sections=60), UploadLoader(uploads, processor)])
+        resolver = SourceResolver([loader, UploadLoader(uploads, processor)])
         registry = ModelRegistry(
             {"fake": ProviderSpec(name="fake", base_url="http://fake", api_key_env="FAKE_KEY")},
             [ModelSpec(provider="fake", model="m1", display_name="Fake 1")],
@@ -67,38 +84,48 @@ def harness(tmp_path, monkeypatch):
             resolver=resolver,
             chunker=Chunker(300, 50),
             embeddings=embeddings,
-            vector_store=store,
+            vector_store=vector_store,
+            documents=documents_repo,
             sources=sources_repo,
             upload_store=uploads,
         )
-        retrieval = RetrievalService(embeddings, store, top_k=3, per_source_k=2)
-        documents = DocumentService(router, max_input_tokens=1100, max_windows=8, tokens_per_minute=0)
+        retrieval = RetrievalService(embeddings, vector_store, top_k=3, per_source_k=2)
+        document_service = DocumentService(router, max_input_tokens=1100, max_windows=8, tokens_per_minute=0)
         collections = CollectionService(collections_repo, sources_repo)
         chat = ChatService(
             sources=sources_repo,
             conversations=conversations_repo,
             collections=collections_repo,
             retrieval=retrieval,
-            documents=documents,
+            documents=document_service,
             router=router,
+        )
+        auth = AuthService(
+            identity_repo, email, secret="test-secret", guest_ttl=timedelta(hours=24), reveal_codes=True
         )
         return Container(
             settings=settings,
             http=httpx.AsyncClient(),
-            db=db,
+            db=None,
             registry=registry,
             router=router,
             embeddings=embeddings,
-            vector_store=store,
+            vector_store=vector_store,
             resolver=resolver,
             ingestion=ingestion,
             chat=chat,
             collections=collections,
+            auth=auth,
+            maintenance=MaintenanceService(identity_repo, guest_ttl=timedelta(hours=24), interval=timedelta(hours=1)),
             transcriber=FakeTranscriber(),
         )
 
     monkeypatch.setattr(Container, "build", staticmethod(build))
     with TestClient(create_app(settings)) as test_client:
+        test_client.headers["X-Guest-Id"] = GUEST_A
+        test_client.store = store  # type: ignore[attr-defined]
+        test_client.loader = loader  # type: ignore[attr-defined]
+        test_client.email = email  # type: ignore[attr-defined]
         yield test_client, client_double
 
 
@@ -107,29 +134,32 @@ def client(harness):
     return harness[0]
 
 
-def wait_ready(client, source_id):
+def as_guest(guest_id: str) -> dict[str, str]:
+    return {"X-Guest-Id": guest_id}
+
+
+def wait_ready(client, source_id, headers=None):
     for _ in range(150):
-        body = client.get(f"/api/v1/sources/{source_id}").json()
+        body = client.get(f"/api/v1/sources/{source_id}", headers=headers).json()
         if body["status"] in ("ready", "failed"):
             return body
         time.sleep(0.02)
     raise AssertionError("source never finished ingesting")
 
 
-def add_source(client, url="https://example.com/page"):
-    created = client.post("/api/v1/sources", json={"url": url})
-    assert created.status_code == 202
-    return wait_ready(client, created.json()["id"])
+def add_source(client, url="https://example.com/page", headers=None):
+    created = client.post("/api/v1/sources", json={"url": url}, headers=headers)
+    assert created.status_code == 202, created.text
+    return wait_ready(client, created.json()["id"], headers)
 
 
-def stream(client, conversation_id, content="", mode="qa"):
+def stream(client, conversation_id, content="", mode="qa", headers=None):
     """Send a message and collect the SSE events by name."""
-    import json
-
     with client.stream(
         "POST",
         f"/api/v1/conversations/{conversation_id}/messages",
         json={"content": content, "mode": mode},
+        headers=headers,
     ) as response:
         assert response.headers["content-type"].startswith("text/event-stream")
         lines = [line for line in "".join(response.iter_text()).splitlines() if line]
@@ -141,6 +171,24 @@ def stream(client, conversation_id, content="", mode="qa"):
             payload = json.loads(lines[index + 1][5:].strip())
             events.setdefault(name, []).append(payload)
     return events
+
+
+def sign_in(client, email="ada@example.com", name="Ada", guest=GUEST_A) -> dict:
+    """Request a code as the guest, verify it, return the session body."""
+    requested = client.post(
+        "/api/v1/auth/request-code", json={"email": email, "display_name": name}, headers=as_guest(guest)
+    )
+    assert requested.status_code == 200, requested.text
+    code = requested.json()["debug_code"]
+    assert code and len(code) == 6
+    verified = client.post("/api/v1/auth/verify", json={"email": email, "code": code}, headers=as_guest(guest))
+    assert verified.status_code == 200, verified.text
+    return verified.json()
+
+
+def as_user(session: dict) -> dict[str, str]:
+    # The guest header stays on the client; a bearer token takes precedence.
+    return {"Authorization": f"Bearer {session['token']}"}
 
 
 # ---------------------------------------------------------------- basics
@@ -155,6 +203,8 @@ def test_health_reports_capabilities(client):
     assert caps["audio_transcription"] is True
     assert caps["javascript_rendering"] is False  # renderer disabled by default
     assert ".docx" in caps["upload_extensions"]
+    assert caps["email_login"] == "console"
+    assert caps["guest_ttl_hours"] == 24
 
 
 def test_modes_endpoint_describes_the_catalogue(client):
@@ -180,6 +230,163 @@ def test_source_lifecycle_and_deduplication(client):
 
     assert client.delete(f"/api/v1/sources/{source['id']}").status_code == 204
     assert client.get(f"/api/v1/sources/{source['id']}").status_code == 404
+
+
+# ---------------------------------------------------------------- identity
+
+
+def test_requests_without_identity_are_refused(client):
+    client.headers.pop("X-Guest-Id")
+    response = client.get("/api/v1/sources")
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "auth_required"
+    # Public endpoints keep working for anyone.
+    assert client.get("/api/v1/health").status_code == 200
+    assert client.get("/api/v1/modes").status_code == 200
+
+
+def test_malformed_guest_ids_are_refused(client):
+    response = client.get("/api/v1/sources", headers=as_guest("not-a-guest-id"))
+    assert response.status_code == 401
+
+
+def test_guests_only_see_their_own_sources(client):
+    mine = add_source(client, "https://example.com/mine")
+    assert [s["id"] for s in client.get("/api/v1/sources").json()] == [mine["id"]]
+
+    assert client.get("/api/v1/sources", headers=as_guest(GUEST_B)).json() == []
+    assert client.get(f"/api/v1/sources/{mine['id']}", headers=as_guest(GUEST_B)).status_code == 404
+    assert client.delete(f"/api/v1/sources/{mine['id']}", headers=as_guest(GUEST_B)).status_code == 404
+    # The other guest's attempt changed nothing.
+    assert client.get(f"/api/v1/sources/{mine['id']}").status_code == 200
+
+    conversation = client.post("/api/v1/conversations", json={"source_id": mine["id"]}).json()
+    assert client.get(f"/api/v1/conversations/{conversation['id']}", headers=as_guest(GUEST_B)).status_code == 404
+
+
+def test_same_url_is_ingested_once_and_shared(client):
+    first = add_source(client, "https://example.com/shared")
+    second = add_source(client, "https://example.com/shared", headers=as_guest(GUEST_B))
+
+    assert first["id"] != second["id"], "each owner gets their own handle"
+    assert first["document_id"] == second["document_id"], "both point at one document"
+    assert client.loader.loads == 1, "the content was fetched and embedded once"
+    assert len(client.store.documents) == 1
+
+    # Deleting one owner's source keeps the document for the other.
+    assert client.delete(f"/api/v1/sources/{first['id']}").status_code == 204
+    assert len(client.store.documents) == 1
+    still = client.get(f"/api/v1/sources/{second['id']}", headers=as_guest(GUEST_B)).json()
+    assert still["status"] == "ready"
+
+    # Deleting the last one drops the document and its chunks.
+    assert client.delete(f"/api/v1/sources/{second['id']}", headers=as_guest(GUEST_B)).status_code == 204
+    assert client.store.documents == {} and client.store.chunks == {}
+
+
+def test_email_code_login_moves_guest_data_into_the_account(client):
+    guest_source = add_source(client, "https://example.com/keep-me")
+    conversation = client.post("/api/v1/conversations", json={"source_id": guest_source["id"]}).json()
+    stream(client, conversation["id"], "What is fact 1?")
+
+    me = client.get("/api/v1/auth/me").json()
+    assert me["kind"] == "guest" and me["owner_id"] == GUEST_A
+
+    session = sign_in(client)
+    assert session["user"]["email"] == "ada@example.com"
+    assert session["user"]["display_name"] == "Ada"
+    assert client.email.sent[0]["to"] == "ada@example.com"
+
+    me = client.get("/api/v1/auth/me", headers=as_user(session)).json()
+    assert me["kind"] == "user" and me["user"]["display_name"] == "Ada"
+
+    # Everything the guest made now belongs to the account...
+    mine = client.get("/api/v1/sources", headers=as_user(session)).json()
+    assert [s["id"] for s in mine] == [guest_source["id"]]
+    history = client.get(f"/api/v1/conversations/{conversation['id']}/messages", headers=as_user(session)).json()
+    assert len(history) == 2
+    # ...and the old guest id holds nothing anymore.
+    assert client.get("/api/v1/sources").json() == []
+
+    # Signing in again on another device needs no name and reuses the account.
+    requested = client.post("/api/v1/auth/request-code", json={"email": "ADA@example.com"}, headers=as_guest(GUEST_B))
+    assert requested.status_code == 200
+    verified = client.post(
+        "/api/v1/auth/verify",
+        json={"email": "ada@example.com", "code": requested.json()["debug_code"]},
+        headers=as_guest(GUEST_B),
+    ).json()
+    assert verified["user"]["id"] == session["user"]["id"]
+    assert [s["id"] for s in client.get("/api/v1/sources", headers=as_user(verified)).json()] == [guest_source["id"]]
+
+
+def test_login_merges_duplicate_sources_instead_of_keeping_two(client):
+    session = sign_in(client, guest=GUEST_B)
+    as_account = as_user(session)
+    kept = add_source(client, "https://example.com/dup", headers=as_account)
+
+    # A guest adds the same URL, chats about it, then signs in to the same account.
+    guest_copy = add_source(client, "https://example.com/dup")
+    assert guest_copy["document_id"] == kept["document_id"]
+    conversation = client.post("/api/v1/conversations", json={"source_id": guest_copy["id"]}).json()
+
+    requested = client.post("/api/v1/auth/request-code", json={"email": "ada@example.com"}).json()
+    merged = client.post(
+        "/api/v1/auth/verify", json={"email": "ada@example.com", "code": requested["debug_code"]}
+    ).json()
+    sources = client.get("/api/v1/sources", headers=as_user(merged)).json()
+    assert [s["id"] for s in sources] == [kept["id"]], "one handle per document per owner"
+    moved = client.get(f"/api/v1/conversations/{conversation['id']}", headers=as_user(merged)).json()
+    assert moved["source_id"] == kept["id"], "the guest's chat now hangs off the account's copy"
+
+
+def test_new_accounts_need_a_name_and_wrong_codes_are_rejected(client):
+    nameless = client.post("/api/v1/auth/request-code", json={"email": "new@example.com"})
+    assert nameless.status_code == 422
+    assert nameless.json()["error"]["details"]["needs_name"] is True
+
+    client.post("/api/v1/auth/request-code", json={"email": "new@example.com", "display_name": "New"})
+    wrong = client.post("/api/v1/auth/verify", json={"email": "new@example.com", "code": "000000"})
+    assert wrong.status_code == 422
+    assert wrong.json()["error"]["details"]["attempts_left"] == 4
+
+    bad_token = client.get("/api/v1/sources", headers={"Authorization": "Bearer nope"})
+    assert bad_token.status_code == 401
+    assert bad_token.json()["error"]["code"] == "session_expired"
+
+
+def test_logout_and_account_deletion(client):
+    session = sign_in(client)
+    add_source(client, "https://example.com/account-only", headers=as_user(session))
+
+    assert client.post("/api/v1/auth/logout", headers=as_user(session)).status_code == 204
+    assert client.get("/api/v1/sources", headers=as_user(session)).status_code == 401
+
+    again = sign_in(client, guest=GUEST_B)
+    assert client.delete("/api/v1/auth/account", headers=as_user(again)).status_code == 204
+    assert client.store.users == {} and client.store.sources == {} and client.store.documents == {}
+
+
+def test_forget_guest_deletes_everything_now(client):
+    add_source(client, "https://example.com/temporary")
+    assert client.delete("/api/v1/auth/guest").status_code == 204
+    assert client.get("/api/v1/sources").json() == []
+    assert client.store.documents == {}
+
+
+def test_expired_guests_are_purged_by_maintenance(client):
+    add_source(client, "https://example.com/old")
+    shared = add_source(client, "https://example.com/both")
+    add_source(client, "https://example.com/both", headers=as_guest(GUEST_B))
+
+    client.store.guests[GUEST_A] = client.store.guests[GUEST_A] - timedelta(hours=25)
+    import asyncio
+
+    removed = asyncio.run(client.app.state.container.maintenance.run_once())
+    assert removed["guests"] == 1
+    assert client.get("/api/v1/sources").json() == [], "the expired guest's sources are gone"
+    # The document the other guest also holds survives; the one only the expired guest had does not.
+    assert set(client.store.documents) == {shared["document_id"]}
 
 
 # ---------------------------------------------------------------- chat
@@ -268,6 +475,12 @@ def test_upload_is_ingested_and_deduplicated_by_content(client):
     same = client.post("/api/v1/sources/upload", files={"file": ("notes.md", payload, "text/markdown")})
     assert same.json()["id"] == source["id"]
 
+    # Another owner uploading the same bytes under another name shares the document.
+    other = client.post(
+        "/api/v1/sources/upload", files={"file": ("renamed.md", payload, "text/markdown")}, headers=as_guest(GUEST_B)
+    ).json()
+    assert other["id"] != source["id"] and other["document_id"] == source["document_id"]
+
 
 def test_upload_rejects_unsupported_and_empty_files(client):
     bad = client.post("/api/v1/sources/upload", files={"file": ("virus.exe", b"MZ\x00", "application/exe")})
@@ -279,7 +492,9 @@ def test_upload_rejects_unsupported_and_empty_files(client):
 
 
 def test_uploaded_audio_is_transcribed_with_timestamps(client):
-    created = client.post("/api/v1/sources/upload", files={"file": ("talk.mp3", b"ID3fake-audio-bytes", "audio/mpeg")})
+    created = client.post(
+        "/api/v1/sources/upload", files={"file": ("talk.mp3", b"ID3fake-audio-bytes", "audio/mpeg")}
+    )
     assert created.status_code == 202
     source = wait_ready(client, created.json()["id"])
     assert source["status"] == "ready"
@@ -318,6 +533,13 @@ def test_collection_chat_searches_every_member(client):
 
     listed = client.get(f"/api/v1/collections/{body['id']}/sources").json()
     assert {s["id"] for s in listed} == {first["id"], second["id"]}
+
+    # Another owner cannot see it, nor build a collection out of my sources.
+    assert client.get(f"/api/v1/collections/{body['id']}", headers=as_guest(GUEST_B)).status_code == 404
+    stolen = client.post(
+        "/api/v1/collections", json={"title": "Theft", "source_ids": [first["id"]]}, headers=as_guest(GUEST_B)
+    )
+    assert stolen.status_code == 404
 
 
 def test_collection_membership_edits(client):
@@ -364,9 +586,6 @@ def test_language_rule_targets_the_latest_message(harness):
 
     system = llm.calls[-1]["system"]
     assert "LATEST message" in system
-    # The nearest instruction is the one obeyed, so it is repeated after the
-    # question itself; the system prompt alone is not enough between two
-    # Latin-script languages.
     # The language is named outright, because "the same language as the question"
     # loses to earlier turns between two Latin-script languages.
     user = llm.calls[-1]["user"]
@@ -401,6 +620,14 @@ def test_rate_limiting_rejects_a_flood_and_says_when_to_retry(harness):
     assert int(refused.headers["Retry-After"]) >= 1
 
 
+def test_login_code_requests_are_rate_limited(client):
+    statuses = [
+        client.post("/api/v1/auth/request-code", json={"email": "a@example.com", "display_name": "A"}).status_code
+        for _ in range(7)
+    ]
+    assert statuses[:5] == [200] * 5 and 429 in statuses[5:]
+
+
 def test_health_is_never_rate_limited(harness):
     """Monitoring must keep working while a caller is being throttled."""
     client, _ = harness
@@ -425,10 +652,7 @@ def test_ingestion_is_queued_rather_than_started_all_at_once(harness):
 
     # Stay under the ingest rate limit, which is exercised by its own test.
     burst = 8
-    accepted = [
-        client.post("/api/v1/sources", json={"url": f"https://example.com/page-{i}"})
-        for i in range(burst)
-    ]
+    accepted = [client.post("/api/v1/sources", json={"url": f"https://example.com/page-{i}"}) for i in range(burst)]
     assert all(r.status_code == 202 for r in accepted), "submissions are accepted immediately"
 
     for response in accepted:

@@ -64,11 +64,22 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     #: Paths that must stay reachable for monitoring.
     EXEMPT = ("/api/v1/health", "/docs", "/openapi.json", "/redoc", "/")
 
-    def __init__(self, app, *, chat_per_minute: int, ingest_per_minute: int, general_per_minute: int):
+    def __init__(
+        self,
+        app,
+        *,
+        chat_per_minute: int,
+        ingest_per_minute: int,
+        general_per_minute: int,
+        auth_per_minute: int = 5,
+    ):
         super().__init__(app)
         self._chat = SlidingWindow(chat_per_minute)
         self._ingest = SlidingWindow(ingest_per_minute)
         self._general = SlidingWindow(general_per_minute)
+        # Requesting a code sends an email and verifying one is a guessing
+        # surface, so both share one tight bucket.
+        self._auth = SlidingWindow(auth_per_minute)
         self._requests_since_sweep = 0
 
     def _bucket(self, request: Request) -> tuple[SlidingWindow, str]:
@@ -77,6 +88,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return self._chat, "chat"
         if method == "POST" and (path == "/api/v1/sources" or path.endswith("/sources/upload")):
             return self._ingest, "ingest"
+        if method == "POST" and path in ("/api/v1/auth/request-code", "/api/v1/auth/verify"):
+            return self._auth, "auth"
         return self._general, "general"
 
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -87,7 +100,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._requests_since_sweep += 1
         if self._requests_since_sweep >= 1000:
             self._requests_since_sweep = 0
-            for window in (self._chat, self._ingest, self._general):
+            for window in (self._chat, self._ingest, self._general, self._auth):
                 window.forget()
 
         window, name = self._bucket(request)

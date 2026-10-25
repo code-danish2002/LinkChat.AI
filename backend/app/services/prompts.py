@@ -141,7 +141,7 @@ def render_chunks(chunks: list[Chunk], *, source_titles: dict[str, str] | None =
     for position, chunk in enumerate(chunks, start=1):
         header = [f"[{position}]"]
         if source_titles and len(source_titles) > 1:
-            title = source_titles.get(chunk.source_id)
+            title = source_titles.get(chunk.document_id)
             if title:
                 header.append(f'from "{title}"')
         start = chunk.metadata.get("start")

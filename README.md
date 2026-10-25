@@ -63,45 +63,39 @@ No GPU is needed, because the only model running on your own hardware is the
 embedding model. A one-gigabyte instance is comfortable.
 
 The embedding model is not bundled in the image. fastembed downloads it on first
-start into `data/embedding-models`, which is on the persistent volume, so it is
-fetched once and reused. On a host with an ephemeral filesystem it would
-re-download on every restart, which is the main reason to attach real storage.
-To avoid the slow first boot entirely, add a build step that imports the model
-so it lands in the image instead.
-
-The backend writes to a named volume, `linkchat_backend-data`, holding the
-vector indexes, the SQLite database and uploaded files. Any host whose
-filesystem resets on restart will lose your sources, so attach real persistent
-storage.
+start into `data/embedding-models`. That cache and in-flight uploads are the
+only things written to local disk, so the backend runs happily on hosts with
+an ephemeral filesystem: everything a user would miss lives in Postgres.
 
 ### What is stored where
 
-Everything lives under `backend/data`, which is the only directory a deployment
-has to persist:
+Records, chunks and embeddings all live in one Postgres database with the
+pgvector extension. Neon's free tier is enough to launch on and needs no card.
+The schema is in `backend/db/schema.postgres.sql`; it is idempotent and applied
+on every start, so a fresh database needs no manual setup.
 
-| Path | Holds |
+| Table | Holds |
 |---|---|
-| `linkchat.sqlite3` | records: sources, collections, conversations, messages with their citations |
-| `vectors/` | two files per source: a `.npy` embedding matrix and a `.json` of chunk text |
-| `uploads/` | uploaded files, content-addressed so the same file twice is stored once |
-| `embedding-models/` | the embedding model, downloaded once on first start |
+| `documents` | one row per piece of content, keyed by normalised URL or upload hash: title, kind, ingestion status, which embedding model built it |
+| `chunks` | the document's text pieces with their `vector` embedding, timestamps and a full-text column |
+| `sources` | an owner's handle on a document; ten people adding one URL are ten rows pointing at one document |
+| `collections`, `collection_sources` | an owner's named groups of their sources |
+| `conversations`, `messages` | an owner's chat threads, with citations as JSON |
+| `users`, `sessions`, `login_codes` | email-code sign-in; codes and tokens are stored only as hashes |
+| `guests` | browser-generated ids and when they were last seen |
 
-SQLite is used for the records because the job is small relational rows with
-transactions: a conversation must not half-save. It needs no server process, no
-port, no credentials and no container, and its driver is in Python's standard
-library, so it adds nothing to install. The whole database is one file, which
-makes a backup a copy.
+**Content is shared, ownership is not.** A URL is read and embedded once however
+many people add it, and the second person to add something still being read
+simply attaches to the work in progress. A database trigger deletes a document
+the moment the last source pointing at it is deleted, and never before.
 
-Adding more *embedding* models would not spread load, which is worth saying
-because it is a natural assumption. They run on your own CPU with no quota to
-distribute, so a second model would consume more memory for the same
-throughput, and indexes built by different models cannot be compared anyway.
-The embedding bottleneck is CPU, and the fix is the ingestion queue above, or
-more cores.
+**Every owned row carries `owner_id`**, and every repository query filters on
+it, so a source, collection or conversation is unreachable to anyone but its
+owner even when its id is known.
 
-Vectors are deliberately **not** in it. They are a dense float matrix that is
-read whole and multiplied, which is what numpy does well and what SQL does
-badly.
+Local disk under `backend/data` holds only the embedding model cache and
+uploaded files while they are being ingested; the original file is discarded
+once its text is in the database.
 
 ### Load, and what runs out first
 
@@ -138,67 +132,40 @@ allows roughly 112,000 tokens a minute, so about forty questions a minute in
 total, with a hard cap of 3,000 Groq requests a day. That suits a few dozen
 active users. Thousands needs paid model capacity.
 
-### Capacity, and why there is no database server
+### Who owns what
 
-SQLite and flat files are a deliberate choice here, not a shortcut, because
-**retrieval is always scoped to one source or one collection**. There is never
-a search across everything, so there is nothing for a vector database to do
-that brute-force cosine over a few hundred vectors does not already do in
-microseconds.
+Two kinds of visitor, and the difference is only how long their data lives.
 
-Measured on 2026-10-17. Per-source index, which is what a search touches:
+**Guests** need no sign-up. The browser makes up an id on first visit, keeps it
+in localStorage and sends it as `X-Guest-Id` on every request. Everything the
+guest adds belongs to that id and is deleted by an hourly job once the guest
+has been quiet for `GUEST_TTL_HOURS` (24 by default). A "Forget me now" button
+deletes it immediately.
 
-| Chunks in one source | Index on disk | Search |
-|---|---|---|
-| 200, a long article | 0.8 MB | 0.2 ms |
-| 1,000 | 4 MB | 0.4 ms |
-| 20,000, roughly a 1,500-page book | 79 MB | 9 ms |
+**Users** sign in with their email and a six-digit code, no password. A session
+token is returned, stored by the browser and sent as `Authorization: Bearer`;
+it lasts `SESSION_TTL_HOURS` (a week) and is extended on use. Signing in from a
+guest moves everything that guest made into the account, collapsing any
+duplicate of a document the account already held, so nothing typed before
+signing in is lost. Headers rather than cookies because the frontend and the
+API live on different domains, where browsers treat a cookie as third-party.
 
-And the database. Measured cost per record as actually stored, a source being
-metadata only and an exchange carrying six citations:
-
-| | |
-|---|---|
-| One source | 424 bytes |
-| One exchange, question and answer | 8.4 KB |
-| Write throughput, single writer | 7,000 messages/second |
-| 16 threads writing at once, one process | 8,200 rows/second, no errors |
-| Look up a source by id or url | 0.03 ms |
-| List the 50 newest sources | 0.31 ms |
-| Load a 20-message thread | 0.43 ms |
-
-Which projects to:
-
-| Usage | Database size |
-|---|---|
-| 100 sources, 1,000 exchanges | 10 MB |
-| 2,000 sources, 20,000 exchanges | 0.2 GB |
-| 50,000 sources, 500,000 exchanges | 4.2 GB |
-| 1,000,000 sources, 10,000,000 exchanges | 85 GB |
-
-SQLite's own ceiling is in the hundreds of terabytes, so size is never what
-runs out first.
-
-So size is not the reason to change either one. The reasons that would are:
-
-- **more than one backend replica.** This is the real ceiling, and it is
-  measured rather than assumed: a second process writing the same file gets
-  `database is locked` immediately. Within one process it is fine, because the
-  repositories serialise writes behind a lock and sixteen concurrent threads
-  sustained 8,200 rows a second with no errors. Reads are never blocked at all,
-  thanks to write-ahead logging. So one backend process of any size is fine and
-  two are not, and the circuit-breaker and pacing state is per-process anyway.
-- **searching across all sources at once**, rather than within one. That is the
-  feature that would justify a real vector index.
-
-Each of those is a repository swap behind the existing ports, not a rewrite.
+Codes go out through `EMAIL_PROVIDER`: `resend` sends real email (free tier at
+https://resend.com), `console` prints the code to the server log. In
+development the console code is also returned to the UI so sign-in works
+without an email account; in production it never is.
 
 ### Deploying
 
-The frontend is a standalone Next.js build and fits a free static or Node host.
-The backend needs an always-on process with a persistent volume. Provider free
-tiers are tied to your account rather than your IP, so the same keys keep
-working from a server.
+The frontend is a standalone Next.js build and fits a free static or Node host
+such as Vercel. The backend is a single always-on process that needs only a
+`DATABASE_URL`; it keeps no state on disk that matters, so Render's free tier
+works. Provider free tiers are tied to your account rather than your IP, so the
+same keys keep working from a server.
+
+Required in production: `DATABASE_URL`, `AUTH_SECRET` (random, so sessions
+survive restarts), `CORS_ORIGINS` set to the frontend's origin, and an email
+provider so users can sign in.
 
 One exception: **YouTube refuses caption requests from most datacenter IP
 ranges**, so YouTube sources that work on your laptop will fail once deployed.
@@ -373,18 +340,21 @@ backend/
       llm/          registry, circuit breakers, OpenAI-compatible client, failover router, validation
       embeddings/   fastembed adapter with fallbacks
       transcription/ Whisper through any OpenAI-compatible provider
-    services/       ingestion, retrieval, chat, whole-document modes, pacing, prompts, collections
-    storage/        SQLite repositories with migrations, local hybrid vector store
+      email/        login-code delivery: console (log) or Resend
+    services/       ingestion, retrieval, chat, whole-document modes, pacing, prompts, collections, auth, maintenance
+    storage/        Postgres repositories (documents, sources, collections, conversations, identity) and the pgvector store
   config/models.yaml
-  tests/            96 tests, no network: fake embeddings, fake providers, real Office files
+  db/schema.postgres.sql
+  tests/            200+ tests, no network: fake embeddings, fake providers, in-memory store; plus a Postgres suite
 frontend/
   src/app/          routes: / (home), /s/[id] (source), /c/[id] (collection)
-  src/components/   chat, sources, collections, models, layout, ui
+  src/components/   chat, sources, collections, models, auth, layout, ui
   src/hooks/        useSources, useSource, useCollections, useConversation, useChat, useCatalogue, useModelPool
   src/lib/api/      typed client, SSE reader, types
+  src/lib/auth.ts   guest id and session token, sent as headers
 ```
 
-The backend follows ports and adapters: services depend on interfaces in `app/domain/ports.py`, and concrete adapters are wired once in `app/core/container.py`. Swapping SQLite for Postgres, or the local index for a hosted vector database, touches the adapter and the container and nothing else.
+The backend follows ports and adapters: services depend on interfaces in `app/domain/ports.py`, and concrete adapters are wired once in `app/core/container.py`. Swapping Postgres for another store, or pgvector for a hosted vector database, touches the adapter and the container and nothing else; the test suite runs the same services against an in-memory store.
 
 ### Adding a source service
 
@@ -405,18 +375,26 @@ Add one `ModeSpec` to `backend/app/services/modes.py`. Set `scope` to `retrieval
 | GET | `/api/v1/health` | status, embedding model, active models, capabilities |
 | GET | `/api/v1/modes` | the mode catalogue, for building a UI |
 | GET | `/api/v1/models` | pool state, breaker state and upstream availability per model |
+| POST | `/api/v1/auth/request-code` | `{email, display_name?}`, emails a six-digit code |
+| POST | `/api/v1/auth/verify` | `{email, code}`, returns a session token; the `X-Guest-Id` sent along is merged into the account |
+| GET | `/api/v1/auth/me` | who the caller is |
+| POST | `/api/v1/auth/logout` | end the session |
+| DELETE | `/api/v1/auth/account` | delete the account and everything it owns |
+| DELETE | `/api/v1/auth/guest` | delete everything the guest id owns, now |
 | POST | `/api/v1/sources` | `{url}`, starts ingestion, 202 |
 | POST | `/api/v1/sources/upload` | multipart file upload, 202 |
 | GET | `/api/v1/sources` | recent sources |
 | GET | `/api/v1/sources/{id}` | one source, poll until `ready` |
 | POST | `/api/v1/sources/{id}/reingest` | re-read a source |
-| DELETE | `/api/v1/sources/{id}` | delete source, index, upload and conversations |
+| DELETE | `/api/v1/sources/{id}` | drop your handle; the shared document goes once nobody holds it |
 | POST | `/api/v1/collections` | `{title, source_ids}` |
 | GET/PATCH/DELETE | `/api/v1/collections/{id}` | read, rename, change members, delete |
 | POST/DELETE | `/api/v1/collections/{id}/sources/{sid}` | add or remove one member |
 | POST | `/api/v1/conversations` | `{source_id}` or `{collection_id}` |
 | GET | `/api/v1/conversations/{id}/messages` | history |
 | POST | `/api/v1/conversations/{id}/messages` | `{content, mode}`, streams SSE |
+
+Every endpoint below `/auth/me` needs an identity: `Authorization: Bearer <token>` for a user or `X-Guest-Id: gst_...` for a guest; health, modes and models are public.
 
 The message stream emits `citations`, `progress`, `model`, `token`, then `done` or `error`.
 
@@ -430,7 +408,7 @@ arriving for a moment after the button is pressed. Interactive docs are at http:
 
 ## Configuration
 
-Everything lives in `backend/.env`, documented in `.env.example`: chunk size and overlap, retrieval depth, history length, temperature, token caps, request timeouts, breaker thresholds, mode budgets and pacing, upload limits, the embedding model list and CORS origins. The frontend needs only `NEXT_PUBLIC_API_URL`.
+Everything lives in `backend/.env`, documented in `.env.example`: the database URL, identity lifetimes and secret, email provider, chunk size and overlap, retrieval depth, history length, temperature, token caps, request timeouts, breaker thresholds, mode budgets and pacing, upload limits, the embedding model list and CORS origins. The frontend needs only `NEXT_PUBLIC_API_URL`.
 
 ### Optional: JavaScript rendering
 
@@ -467,15 +445,17 @@ Audio needs a speech-to-text provider. Groq serves Whisper on the same key as it
 ## Testing
 
 ```bash
-make test        # 96 backend tests
+make test        # backend tests, no network
+TEST_DATABASE_URL=postgresql://... make test   # also runs the Postgres adapter suite
 make lint        # ruff, eslint, tsc
 ```
 
-The suite never touches the network. It uses deterministic fake embeddings, scripted fake providers, and real Office files generated by the same libraries that read them. It covers chunking, URL safety, the circuit breaker and failure classification, failover and load spreading, the hybrid index, the streaming protocol, rate-limit pacing, whole-document modes including recursive condensing and rate-limit recovery, database migration from the previous schema, and the full API surface.
+The suite never touches the network. It uses deterministic fake embeddings, scripted fake providers, and real Office files generated by the same libraries that read them. It covers chunking, URL safety, the circuit breaker and failure classification, failover and load spreading, the hybrid index, the streaming protocol, rate-limit pacing, whole-document modes including recursive condensing and rate-limit recovery, owner isolation, shared documents and their cleanup, the sign-in flow, and the full API surface. Set `TEST_DATABASE_URL` to also exercise the real Postgres adapters against a scratch database.
 
 ## Notes and limits
 
-- **No authentication, and therefore no private history.** Every source and conversation is global. Nothing is stored in the browser except the light or dark preference, so opening the app in a private window, in another browser, or on another device shows the same sources and the same chat history: there is no identity to separate them by. That is fine for a local tool and wrong for anything exposed. Authentication and per-user data would have to come first, and nothing in the schema has a user column yet.
+- **Guests are a browser, not a person.** Clearing site data, a private window or another device is a new guest with nothing in it, and the old guest's sources vanish after a day. Signing in is what makes a library follow a person.
+- **Single process.** Rate-limit counters, circuit breakers and the "already ingesting" set live in memory, so run one backend instance. The database is shared, so a second instance would work but double-count nothing and double-ingest occasionally.
 - **YouTube blocks caption requests from many data-centre IP ranges.** Run the backend from a home network for YouTube sources.
 - **Answers inherit transcription errors.** The chain is only as accurate as the captions or the speech recognition beneath it. Testing Arabic audio, Whisper heard "one hundred thousand" where the speaker said "two hundred thousand", and the answer faithfully repeated the transcript. That is the system working as designed, staying grounded rather than guessing, but numbers and proper nouns in non-English speech deserve a check against the source.
 - **Podcast pages are not supported directly.** Spotify and Apple pages do not expose an audio URL. Use a direct audio link or upload the file.

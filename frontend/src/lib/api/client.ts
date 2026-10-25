@@ -1,3 +1,5 @@
+import { authHeaders, getToken, setToken } from "@/lib/auth";
+
 import { readSse } from "./sse";
 import type {
   ApiErrorBody,
@@ -6,9 +8,12 @@ import type {
   Collection,
   Conversation,
   Health,
+  Me,
   Message,
   Mode,
   ModelPool,
+  RequestCodeResult,
+  SessionInfo,
   Source,
 } from "./types";
 
@@ -30,15 +35,30 @@ export class ApiError extends Error {
 const unreachable = () =>
   new ApiError(0, "network_error", `Cannot reach the API at ${API_BASE}. Is the backend running?`);
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** A stored session the server no longer accepts is dropped, and the call retried as the guest. */
+function expireSession(error: ApiError): boolean {
+  if (error.status === 401 && error.code === "session_expired" && getToken()) {
+    setToken(null);
+    return true;
+  }
+  return false;
+}
+
+async function request<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   let response: Response;
-  const headers = init.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...(init.headers ?? {}) };
+  const headers: Record<string, string> = { ...authHeaders() };
+  if (!(init.body instanceof FormData)) headers["Content-Type"] = "application/json";
+  Object.assign(headers, (init.headers as Record<string, string> | undefined) ?? {});
   try {
     response = await fetch(`${API}${path}`, { ...init, headers });
   } catch {
     throw unreachable();
   }
-  if (!response.ok) throw await toApiError(response);
+  if (!response.ok) {
+    const error = await toApiError(response);
+    if (!retried && expireSession(error)) return request<T>(path, init, true);
+    throw error;
+  }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
@@ -63,6 +83,20 @@ export const api = {
   health: () => request<Health>("/health"),
   models: () => request<ModelPool>("/models"),
   modes: () => request<Mode[]>("/modes"),
+
+  auth: {
+    me: () => request<Me>("/auth/me"),
+    requestCode: (email: string, display_name?: string) =>
+      request<RequestCodeResult>("/auth/request-code", {
+        method: "POST",
+        body: JSON.stringify(display_name ? { email, display_name } : { email }),
+      }),
+    verify: (email: string, code: string) =>
+      request<SessionInfo>("/auth/verify", { method: "POST", body: JSON.stringify({ email, code }) }),
+    logout: () => request<void>("/auth/logout", { method: "POST" }),
+    deleteAccount: () => request<void>("/auth/account", { method: "DELETE" }),
+    forgetGuest: () => request<void>("/auth/guest", { method: "DELETE" }),
+  },
 
   sources: {
     list: (limit = 50) => request<Source[]>(`/sources?limit=${limit}`),
@@ -107,7 +141,7 @@ export const api = {
       try {
         response = await fetch(`${API}/conversations/${encodeURIComponent(id)}/messages`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+          headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeaders() },
           body: JSON.stringify({ content, mode }),
           signal,
         });
@@ -115,7 +149,11 @@ export const api = {
         if ((error as Error).name === "AbortError") return;
         throw unreachable();
       }
-      if (!response.ok) throw await toApiError(response);
+      if (!response.ok) {
+        const error = await toApiError(response);
+        expireSession(error);
+        throw error;
+      }
 
       for await (const message of readSse(response, signal)) {
         yield { type: message.event, data: JSON.parse(message.data) } as ChatStreamEvent;

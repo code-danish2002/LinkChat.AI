@@ -27,7 +27,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         container = Container.build(settings)
         app.state.container = container
-        container.start_background_tasks()
+        await container.start()
         log.info("%s v%s ready", settings.app_name, settings.app_version)
         try:
             yield
@@ -46,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         chat_per_minute=settings.rate_limit_chat_per_minute,
         ingest_per_minute=settings.rate_limit_ingest_per_minute,
         general_per_minute=settings.rate_limit_general_per_minute,
+        auth_per_minute=settings.rate_limit_auth_per_minute,
     )
     app.add_middleware(
         CORSMiddleware,

@@ -22,6 +22,27 @@ class NotFoundError(AppError):
     code = "not_found"
 
 
+class AuthRequiredError(AppError):
+    """No guest id and no session token came with the request."""
+
+    status_code = 401
+    code = "auth_required"
+
+
+class SessionExpiredError(AppError):
+    """The bearer token is unknown or past its expiry; the client should drop it."""
+
+    status_code = 401
+    code = "session_expired"
+
+
+class ConfigurationError(AppError):
+    """The server is missing a setting it cannot run without."""
+
+    status_code = 500
+    code = "misconfigured"
+
+
 class ValidationError(AppError):
     status_code = 422
     code = "validation_error"

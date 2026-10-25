@@ -2,7 +2,8 @@
 
 A conversation targets exactly one thing: a single source, or a collection
 of them. Each message carries a mode, which decides whether the answer comes
-from the best matching excerpts or from the whole document.
+from the best matching excerpts or from the whole document. Every entry
+point takes the owner, and nothing is returned that the owner does not hold.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from app.domain.models import (
     ChatMode,
     Chunk,
     Citation,
+    Collection,
     Conversation,
     Message,
     MessageRole,
@@ -56,12 +58,17 @@ class Target:
     sources: list[Source] = field(default_factory=list)
 
     @property
-    def source_ids(self) -> list[str]:
-        return [source.id for source in self.sources]
+    def document_ids(self) -> list[str]:
+        return [source.document_id for source in self.sources]
+
+    @property
+    def by_document(self) -> dict[str, Source]:
+        return {source.document_id: source for source in self.sources}
 
     @property
     def titles(self) -> dict[str, str]:
-        return {source.id: source.title for source in self.sources}
+        """Source titles keyed by document id, which is what chunks carry."""
+        return {source.document_id: source.title for source in self.sources}
 
     @property
     def count(self) -> int:
@@ -92,8 +99,9 @@ class ChatService:
 
     # ---- conversations ----
 
-    def create_conversation(
+    async def create_conversation(
         self,
+        owner_id: str,
         source_id: str | None = None,
         title: str | None = None,
         collection_id: str | None = None,
@@ -101,43 +109,44 @@ class ChatService:
         if bool(source_id) == bool(collection_id):
             raise ValidationError("Provide exactly one of source_id or collection_id.")
         if source_id:
-            target_title = self._require_source(source_id).title
+            target_title = (await self._require_source(owner_id, source_id)).title
         else:
-            target_title = self._require_collection(collection_id or "").title
+            target_title = (await self._require_collection(owner_id, collection_id or "")).title
         conversation = Conversation(
             id=new_id("cnv"),
+            owner_id=owner_id,
             title=title or target_title,
             source_id=source_id,
             collection_id=collection_id,
         )
-        return self._conversations.add(conversation)
+        return await self._conversations.add(conversation)
 
-    def get_conversation(self, conversation_id: str) -> Conversation:
-        conversation = self._conversations.get(conversation_id)
+    async def get_conversation(self, owner_id: str, conversation_id: str) -> Conversation:
+        conversation = await self._conversations.get(owner_id, conversation_id)
         if conversation is None:
             raise NotFoundError("Conversation not found.")
         return conversation
 
-    def list_conversations(self, source_id: str) -> list[Conversation]:
-        self._require_source(source_id)
-        return self._conversations.list_for_source(source_id)
+    async def list_conversations(self, owner_id: str, source_id: str) -> list[Conversation]:
+        await self._require_source(owner_id, source_id)
+        return await self._conversations.list_for_source(owner_id, source_id)
 
-    def list_collection_conversations(self, collection_id: str) -> list[Conversation]:
-        self._require_collection(collection_id)
-        return self._conversations.list_for_collection(collection_id)
+    async def list_collection_conversations(self, owner_id: str, collection_id: str) -> list[Conversation]:
+        await self._require_collection(owner_id, collection_id)
+        return await self._conversations.list_for_collection(owner_id, collection_id)
 
-    def delete_conversation(self, conversation_id: str) -> None:
-        self.get_conversation(conversation_id)
-        self._conversations.delete(conversation_id)
+    async def delete_conversation(self, owner_id: str, conversation_id: str) -> None:
+        await self.get_conversation(owner_id, conversation_id)
+        await self._conversations.delete(owner_id, conversation_id)
 
-    def list_messages(self, conversation_id: str) -> list[Message]:
-        self.get_conversation(conversation_id)
-        return self._conversations.list_messages(conversation_id)
+    async def list_messages(self, owner_id: str, conversation_id: str) -> list[Message]:
+        await self.get_conversation(owner_id, conversation_id)
+        return await self._conversations.list_messages(conversation_id)
 
     # ---- answering ----
 
     async def stream_answer(
-        self, conversation_id: str, content: str, mode: ChatMode | str = ChatMode.QA
+        self, owner_id: str, conversation_id: str, content: str, mode: ChatMode | str = ChatMode.QA
     ) -> AsyncIterator[StreamEvent]:
         spec = get_mode(mode)
         user_input = (content or "").strip()
@@ -146,8 +155,8 @@ class ChatService:
         if len(user_input) > _MAX_INPUT_CHARS:
             raise ValidationError(f"The message is too long (max {_MAX_INPUT_CHARS} characters).")
 
-        conversation = self.get_conversation(conversation_id)
-        target = self._resolve_target(conversation)
+        conversation = await self.get_conversation(owner_id, conversation_id)
+        target = await self._resolve_target(conversation)
 
         if spec.is_document_scope:
             async for event in self._answer_from_document(conversation, target, spec, user_input):
@@ -161,9 +170,9 @@ class ChatService:
     async def _answer_from_excerpts(
         self, conversation: Conversation, target: Target, spec: ModeSpec, question: str
     ) -> AsyncIterator[StreamEvent]:
-        history = self._conversations.list_messages(conversation.id, limit=self._max_history)
+        history = await self._conversations.list_messages(conversation.id, limit=self._max_history)
         retrieved = await self._retrieval.retrieve_many(
-            target.source_ids, self._retrieval_query(question, history)
+            target.document_ids, self._retrieval_query(question, history)
         )
         citations = self._citations_from_retrieval(retrieved, target)
         yield StreamEvent("citations", [self._citation_payload(c) for c in citations])
@@ -177,9 +186,7 @@ class ChatService:
             citations=citations,
             source_count=target.count,
         )
-        async for event in self._generate(
-            conversation, spec, question, citations, messages, emit_citations=False
-        ):
+        async for event in self._generate(conversation, spec, question, citations, messages, emit_citations=False):
             yield event
 
     # ---- document-scoped modes ----
@@ -187,7 +194,7 @@ class ChatService:
     async def _answer_from_document(
         self, conversation: Conversation, target: Target, spec: ModeSpec, user_input: str
     ) -> AsyncIterator[StreamEvent]:
-        chunks = await self._retrieval.all_chunks(target.source_ids)
+        chunks = await self._retrieval.all_chunks(target.document_ids)
         prompt_text = user_input or spec.default_prompt
         answer_parts: list[str] = []
         model_id: str | None = None
@@ -218,7 +225,7 @@ class ChatService:
         citations = self._citations_from_markers(answer, chunks, target)
         if citations:
             yield StreamEvent("citations", [self._citation_payload(c) for c in citations])
-        yield self._persist(conversation, spec, prompt_text, answer, model_id, citations)
+        yield await self._persist(conversation, spec, prompt_text, answer, model_id, citations)
 
     # ---- shared generation ----
 
@@ -259,9 +266,9 @@ class ChatService:
         answer = self._normalize(answer_parts)
         if emit_citations and citations:
             yield StreamEvent("citations", [self._citation_payload(c) for c in citations])
-        yield self._persist(conversation, spec, prompt_text, answer, model_id, citations)
+        yield await self._persist(conversation, spec, prompt_text, answer, model_id, citations)
 
-    def _persist(
+    async def _persist(
         self,
         conversation: Conversation,
         spec: ModeSpec,
@@ -270,7 +277,7 @@ class ChatService:
         model_id: str | None,
         citations: list[Citation],
     ) -> StreamEvent:
-        user_message = self._conversations.add_message(
+        user_message = await self._conversations.add_message(
             Message(
                 id=new_id("msg"),
                 conversation_id=conversation.id,
@@ -279,7 +286,7 @@ class ChatService:
                 mode=spec.id,
             )
         )
-        assistant_message = self._conversations.add_message(
+        assistant_message = await self._conversations.add_message(
             Message(
                 id=new_id("msg"),
                 conversation_id=conversation.id,
@@ -316,21 +323,17 @@ class ChatService:
                 return f"{previous[-1].content}\n{question}"
         return question
 
-    def _resolve_target(self, conversation: Conversation) -> Target:
+    async def _resolve_target(self, conversation: Conversation) -> Target:
+        owner_id = conversation.owner_id
         if conversation.source_id:
-            source = self._require_source(conversation.source_id)
+            source = await self._require_source(owner_id, conversation.source_id)
             if source.status is not SourceStatus.READY:
-                raise SourceNotReadyError(
-                    f"The source is not ready yet (status: {source.status.value})."
-                )
+                raise SourceNotReadyError(f"The source is not ready yet (status: {source.status.value}).")
             return Target(title=source.title, kind=source.kind, sources=[source])
 
-        collection = self._require_collection(conversation.collection_id or "")
-        sources = [
-            source
-            for source in (self._sources.get(sid) for sid in collection.source_ids)
-            if source is not None and source.status is SourceStatus.READY
-        ]
+        collection = await self._require_collection(owner_id, conversation.collection_id or "")
+        members = await self._sources.get_many(owner_id, collection.source_ids)
+        sources = [source for source in members if source.status is SourceStatus.READY]
         if not sources:
             raise SourceNotReadyError("This collection has no ready sources yet.")
         kinds = {source.kind for source in sources}
@@ -340,10 +343,8 @@ class ChatService:
             sources=sources,
         )
 
-    def _citations_from_retrieval(
-        self, retrieved: list[RetrievedChunk], target: Target
-    ) -> list[Citation]:
-        titles = target.titles
+    def _citations_from_retrieval(self, retrieved: list[RetrievedChunk], target: Target) -> list[Citation]:
+        by_document = target.by_document
         citations: list[Citation] = []
         for position, item in enumerate(retrieved, start=1):
             citations.append(
@@ -352,18 +353,16 @@ class ChatService:
                     chunk_id=item.chunk.id,
                     text=item.chunk.text,
                     score=item.score,
-                    metadata=self._citation_metadata(item.chunk, target, titles),
+                    metadata=self._citation_metadata(item.chunk, target, by_document),
                 )
             )
         return citations
 
-    def _citations_from_markers(
-        self, answer: str, chunks: list[Chunk], target: Target
-    ) -> list[Citation]:
+    def _citations_from_markers(self, answer: str, chunks: list[Chunk], target: Target) -> list[Citation]:
         """Build citations for the [n] markers a whole-document answer actually used."""
         if not chunks:
             return []
-        titles = target.titles
+        by_document = target.by_document
         used = sorted(
             {
                 int(match.group(1))
@@ -380,32 +379,30 @@ class ChatService:
                     chunk_id=chunk.id,
                     text=chunk.text,
                     score=1.0,
-                    metadata=self._citation_metadata(chunk, target, titles),
+                    metadata=self._citation_metadata(chunk, target, by_document),
                 )
             )
         return citations
 
-    def _citation_metadata(
-        self, chunk: Chunk, target: Target, titles: dict[str, str]
-    ) -> dict[str, Any]:
+    def _citation_metadata(self, chunk: Chunk, target: Target, by_document: dict[str, Source]) -> dict[str, Any]:
         metadata = dict(chunk.metadata)
         metadata["chunk_index"] = chunk.index
-        if target.count > 1:
-            metadata["source_id"] = chunk.source_id
-            metadata["source_title"] = titles.get(chunk.source_id)
+        source = by_document.get(chunk.document_id)
+        if target.count > 1 and source is not None:
+            metadata["source_id"] = source.id
+            metadata["source_title"] = source.title
         start = metadata.get("start")
         if start is not None:
             seconds = int(float(start))
             metadata["timestamp"] = format_timestamp(float(start))
-            link = self._deep_link(chunk.source_id, target, seconds)
+            link = self._deep_link(source, seconds)
             if link:
                 metadata["link"] = link
         return metadata
 
     @staticmethod
-    def _deep_link(source_id: str, target: Target, seconds: int) -> str | None:
+    def _deep_link(source: Source | None, seconds: int) -> str | None:
         """A link back to the exact moment, where the source kind supports one."""
-        source = next((s for s in target.sources if s.id == source_id), None)
         if source is None:
             return None
         if source.kind is SourceKind.YOUTUBE:
@@ -418,11 +415,7 @@ class ChatService:
 
     def _citation_payload(self, citation: Citation) -> dict[str, Any]:
         text = citation.text
-        preview = (
-            text
-            if len(text) <= self._preview_chars
-            else text[: self._preview_chars].rstrip() + "…"
-        )
+        preview = text if len(text) <= self._preview_chars else text[: self._preview_chars].rstrip() + "…"
         return {
             "index": citation.index,
             "chunk_id": citation.chunk_id,
@@ -431,16 +424,16 @@ class ChatService:
             "metadata": citation.metadata,
         }
 
-    def _require_source(self, source_id: str) -> Source:
-        source = self._sources.get(source_id)
+    async def _require_source(self, owner_id: str, source_id: str) -> Source:
+        source = await self._sources.get(owner_id, source_id)
         if source is None:
             raise NotFoundError("Source not found.")
         return source
 
-    def _require_collection(self, collection_id: str):
+    async def _require_collection(self, owner_id: str, collection_id: str) -> Collection:
         if self._collections is None:
             raise NotFoundError("Collections are not enabled.")
-        collection = self._collections.get(collection_id)
+        collection = await self._collections.get(owner_id, collection_id)
         if collection is None:
             raise NotFoundError("Collection not found.")
         return collection
