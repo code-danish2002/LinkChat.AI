@@ -222,6 +222,20 @@ and in English.
 
 **Twelve modes, not just questions.** Asking a question retrieves the best passages. Every other mode reads the whole document and needs no typing at all: summarise, key points, outline with timestamps, action items, extract to a table, flashcards, quiz, explain simply, translate, fact-check a claim, or rewrite as a blog post. Adding one is a single entry in `backend/app/services/modes.py`.
 
+**Talk to it.** The mic in the composer opens a hands-free voice conversation.
+A voice-activity detector (Silero, running in the browser) notices when you
+stop talking and sends that utterance as audio; the server transcribes it with
+the same Whisper step that reads uploaded recordings, answers from the source
+as usual, and the answer is spoken sentence by sentence while it is still
+streaming, so the first words are heard about two seconds after you fall
+silent. Talking over the answer stops it and starts a new turn. Spoken answers
+are written for the ear (two to four plain sentences, no lists) but keep their
+citations, which stay on screen and in the saved chat. Every answer also has a
+"Read aloud" button, and a speaker toggle reads typed answers as they arrive.
+Speech output uses the browser's own voices, chosen to match the language of
+the question; nothing is paid for and no audio leaves the browser except the
+question itself.
+
 **The answering model is visible.** Which pool member is replying is named
 under the answer and pinned beside the composer, live while it types rather
 than only once it has finished. Conversations are assigned a model, so that
@@ -352,6 +366,7 @@ frontend/
   src/hooks/        useSources, useSource, useCollections, useConversation, useChat, useCatalogue, useModelPool
   src/lib/api/      typed client, SSE reader, types
   src/lib/auth.ts   guest id and session token, sent as headers
+  src/lib/speech.ts WAV encoding, sentence-by-sentence speech output, voice and language choice
 ```
 
 The backend follows ports and adapters: services depend on interfaces in `app/domain/ports.py`, and concrete adapters are wired once in `app/core/container.py`. Swapping Postgres for another store, or pgvector for a hosted vector database, touches the adapter and the container and nothing else; the test suite runs the same services against an in-memory store.
@@ -392,11 +407,12 @@ Add one `ModeSpec` to `backend/app/services/modes.py`. Set `scope` to `retrieval
 | POST/DELETE | `/api/v1/collections/{id}/sources/{sid}` | add or remove one member |
 | POST | `/api/v1/conversations` | `{source_id}` or `{collection_id}` |
 | GET | `/api/v1/conversations/{id}/messages` | history |
-| POST | `/api/v1/conversations/{id}/messages` | `{content, mode}`, streams SSE |
+| POST | `/api/v1/conversations/{id}/messages` | `{content, mode, spoken?}`, streams SSE; `spoken` asks for an answer written to be read aloud |
+| POST | `/api/v1/conversations/{id}/voice` | multipart `audio` (+ `mode`), a spoken question; streams `transcript` first, then the same events |
 
 Every endpoint below `/auth/me` needs an identity: `Authorization: Bearer <token>` for a user or `X-Guest-Id: gst_...` for a guest; health, modes and models are public.
 
-The message stream emits `citations`, `progress`, `model`, `token`, then `done` or `error`.
+The message stream emits `citations`, `progress`, `model`, `token`, then `done` or `error`; a voice turn starts with `transcript`. `done` carries the detected language of the question so the client can pick a voice.
 
 Stopping an answer aborts the request. The server notices the client has gone
 and abandons the generation, so nothing further is spent and nothing is saved:
@@ -440,7 +456,7 @@ an 8B model wants roughly 8 GB of free memory while answering.
 
 ### Optional: audio
 
-Audio needs a speech-to-text provider. Groq serves Whisper on the same key as its chat models, so a Groq key enables it with no extra setup. Files up to 24 MB are accepted; longer recordings should be split first.
+Audio needs a speech-to-text provider. Groq serves Whisper on the same key as its chat models, so a Groq key enables it with no extra setup. Files up to 24 MB are accepted; longer recordings should be split first. The same provider powers spoken questions in the voice conversation; a spoken question is capped at `MAX_VOICE_BYTES` (6 MB, about three minutes of 16 kHz audio) and the UI stops at ninety seconds.
 
 ## Testing
 
@@ -454,6 +470,7 @@ The suite never touches the network. It uses deterministic fake embeddings, scri
 
 ## Notes and limits
 
+- **Voice is a pipeline, not a realtime model.** Speech is transcribed, answered and spoken as three steps, so a reply starts about two to three seconds after you stop talking. A sub-second, interruptible-mid-word experience needs a paid speech-to-speech model. The browser's voices are clear but not human-sounding. On laptop speakers the detector can hear the answer and interrupt itself; the session has a switch to turn barge-in off, and headphones avoid it entirely.
 - **Guests are a browser, not a person.** Clearing site data, a private window or another device is a new guest with nothing in it, and the old guest's sources vanish after a day. Signing in is what makes a library follow a person.
 - **Single process.** Rate-limit counters, circuit breakers and the "already ingesting" set live in memory, so run one backend instance. The database is shared, so a second instance would work but double-count nothing and double-ingest occasionally.
 - **YouTube blocks caption requests from many data-centre IP ranges.** Run the backend from a home network for YouTube sources.

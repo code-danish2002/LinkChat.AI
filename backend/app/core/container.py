@@ -245,8 +245,10 @@ class Container:
             retrieval=retrieval,
             documents=documents,
             router=router,
+            transcriber=transcriber,
             max_history_messages=settings.max_history_messages,
             citation_preview_chars=settings.citation_preview_chars,
+            max_voice_bytes=settings.max_voice_bytes,
         )
 
         return cls(

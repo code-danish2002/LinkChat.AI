@@ -8,6 +8,7 @@ point takes the owner, and nothing is returned that the owner does not hold.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.exceptions import (
+    IngestionError,
     NoModelAvailableError,
     NotFoundError,
     SourceNotReadyError,
@@ -34,12 +36,13 @@ from app.domain.models import (
     SourceKind,
     SourceStatus,
 )
-from app.domain.ports import CollectionRepository, ConversationRepository, SourceRepository
+from app.domain.ports import CollectionRepository, ConversationRepository, SourceRepository, Transcriber
 from app.providers.llm.router import ModelRouter
 from app.services.document_service import DocumentService
 from app.services.events import StreamEvent
+from app.services.language import detect_language
 from app.services.modes import ModeSpec, get_mode
-from app.services.prompts import build_retrieval_messages, format_timestamp
+from app.services.prompts import build_retrieval_messages, format_timestamp, spoken
 from app.services.retrieval_service import RetrievalService
 
 log = logging.getLogger(__name__)
@@ -85,8 +88,10 @@ class ChatService:
         documents: DocumentService,
         router: ModelRouter,
         collections: CollectionRepository | None = None,
+        transcriber: Transcriber | None = None,
         max_history_messages: int = 8,
         citation_preview_chars: int = 420,
+        max_voice_bytes: int = 6 * 1024 * 1024,
     ):
         self._sources = sources
         self._conversations = conversations
@@ -94,8 +99,14 @@ class ChatService:
         self._retrieval = retrieval
         self._documents = documents
         self._router = router
+        self._transcriber = transcriber
         self._max_history = max_history_messages
         self._preview_chars = citation_preview_chars
+        self._max_voice_bytes = max_voice_bytes
+
+    @property
+    def voice_available(self) -> bool:
+        return self._transcriber is not None and self._transcriber.available
 
     # ---- conversations ----
 
@@ -146,9 +157,18 @@ class ChatService:
     # ---- answering ----
 
     async def stream_answer(
-        self, owner_id: str, conversation_id: str, content: str, mode: ChatMode | str = ChatMode.QA
+        self,
+        owner_id: str,
+        conversation_id: str,
+        content: str,
+        mode: ChatMode | str = ChatMode.QA,
+        *,
+        spoken_answer: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         spec = get_mode(mode)
+        if spoken_answer:
+            # Same task, written to be heard rather than read.
+            spec = dataclasses.replace(spec, instruction=spoken(spec.instruction))
         user_input = (content or "").strip()
         if spec.needs_input and not user_input:
             raise ValidationError(f"{spec.label} needs {spec.input_label or 'input'}.")
@@ -164,6 +184,52 @@ class ChatService:
         else:
             async for event in self._answer_from_excerpts(conversation, target, spec, user_input):
                 yield event
+
+    async def stream_voice_answer(
+        self,
+        owner_id: str,
+        conversation_id: str,
+        audio: bytes,
+        filename: str,
+        mode: ChatMode | str = ChatMode.QA,
+    ) -> AsyncIterator[StreamEvent]:
+        """A spoken question: transcribe it, say what was heard, then answer aloud-style.
+
+        The transcript is the first event so the user sees their words while
+        the answer is still being produced, and can spot a misheard name.
+        """
+        if not self.voice_available:
+            raise ValidationError(
+                "Voice needs a speech-to-text provider. Set GROQ_API_KEY to enable Whisper transcription."
+            )
+        if not audio:
+            raise ValidationError("The recording is empty.")
+        if len(audio) > self._max_voice_bytes:
+            raise ValidationError(
+                f"The recording is {len(audio) / (1024 * 1024):.1f} MB; a spoken question is capped at "
+                f"{self._max_voice_bytes // (1024 * 1024)} MB."
+            )
+        await self.get_conversation(owner_id, conversation_id)
+
+        try:
+            segments, meta = await self._transcriber.transcribe(audio, filename)  # type: ignore[union-attr]
+        except IngestionError as exc:
+            yield StreamEvent("error", f"I could not transcribe that. {exc.message}")
+            return
+        text = " ".join(" ".join(segment.text.split()) for segment in segments if segment.text.strip()).strip()
+        if not text:
+            yield StreamEvent("error", "I did not catch anything. Try speaking a little closer to the microphone.")
+            return
+        yield StreamEvent(
+            "transcript",
+            {
+                "text": text,
+                "language": meta.get("language"),
+                "duration_seconds": meta.get("duration_seconds"),
+            },
+        )
+        async for event in self.stream_answer(owner_id, conversation_id, text, mode, spoken_answer=True):
+            yield event
 
     # ---- retrieval-scoped modes ----
 
@@ -186,7 +252,9 @@ class ChatService:
             citations=citations,
             source_count=target.count,
         )
-        async for event in self._generate(conversation, spec, question, citations, messages, emit_citations=False):
+        async for event in self._generate(
+            conversation, spec, question, citations, messages, emit_citations=False, language=detect_language(question)
+        ):
             yield event
 
     # ---- document-scoped modes ----
@@ -225,7 +293,8 @@ class ChatService:
         citations = self._citations_from_markers(answer, chunks, target)
         if citations:
             yield StreamEvent("citations", [self._citation_payload(c) for c in citations])
-        yield await self._persist(conversation, spec, prompt_text, answer, model_id, citations)
+        language = detect_language(user_input) if user_input else detect_language(answer)
+        yield await self._persist(conversation, spec, prompt_text, answer, model_id, citations, language)
 
     # ---- shared generation ----
 
@@ -238,6 +307,7 @@ class ChatService:
         messages: list[Any],
         *,
         emit_citations: bool,
+        language: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         answer_parts: list[str] = []
         model_id: str | None = None
@@ -266,7 +336,7 @@ class ChatService:
         answer = self._normalize(answer_parts)
         if emit_citations and citations:
             yield StreamEvent("citations", [self._citation_payload(c) for c in citations])
-        yield await self._persist(conversation, spec, prompt_text, answer, model_id, citations)
+        yield await self._persist(conversation, spec, prompt_text, answer, model_id, citations, language)
 
     async def _persist(
         self,
@@ -276,6 +346,7 @@ class ChatService:
         answer: str,
         model_id: str | None,
         citations: list[Citation],
+        language: str | None = None,
     ) -> StreamEvent:
         user_message = await self._conversations.add_message(
             Message(
@@ -304,6 +375,8 @@ class ChatService:
                 "assistant_message_id": assistant_message.id,
                 "model": model_id,
                 "mode": spec.id.value,
+                # The language of the question, named so a voice can be chosen to read the answer.
+                "language": language,
             },
         )
 

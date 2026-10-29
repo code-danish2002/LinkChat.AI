@@ -1,5 +1,6 @@
 """The event vocabulary services stream to the API layer.
 
+- `transcript` what was heard, for a spoken question (first event of a voice turn)
 - `citations` the excerpts the answer is grounded in
 - `progress`  human-readable status during multi-step work
 - `model`     which pool member is answering
@@ -13,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-EventType = Literal["citations", "progress", "model", "token", "done", "error"]
+EventType = Literal["transcript", "citations", "progress", "model", "token", "done", "error"]
 
 
 @dataclass(frozen=True)

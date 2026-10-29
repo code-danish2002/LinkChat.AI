@@ -20,7 +20,7 @@ import { api } from "@/lib/api/client";
 export function SourceWorkspace({ sourceId }: { sourceId: string }) {
   const router = useRouter();
   const { source, error, notFound, reingest } = useSource(sourceId);
-  const { modes } = useCatalogue();
+  const { modes, capabilities } = useCatalogue();
   const ready = source?.status === "ready";
   const { conversation, error: conversationError, startNew } = useConversation({ source_id: sourceId }, ready);
 
@@ -95,6 +95,7 @@ export function SourceWorkspace({ sourceId }: { sourceId: string }) {
             pending={<PendingNotice source={source} />}
             conversationId={conversation?.id ?? null}
             modes={modes}
+            voice={capabilities?.voice ?? false}
           />
         </div>
       </div>

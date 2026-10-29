@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-
-
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Composer } from "@/components/chat/Composer";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { ModeBar, modeIcon } from "@/components/chat/ModeBar";
+import { VoiceSession } from "@/components/chat/VoiceSession";
 import { Icon } from "@/components/ui/Icon";
-import { useChat } from "@/hooks/useChat";
-import type { ChatModeId, Mode, SourceKind } from "@/lib/api/types";
+import { useChat, type ChatMessage } from "@/hooks/useChat";
+import type { ChatModeId, ChatStreamEvent, Mode, SourceKind } from "@/lib/api/types";
 import { modelLabel } from "@/lib/format";
+import { Speaker, languageTag, supportsSpeechInput, supportsSpeechOutput } from "@/lib/speech";
+
+const READ_ALOUD_KEY = "linkchat.readAloud";
 
 const QA: Mode = {
   id: "qa",
@@ -40,6 +42,7 @@ export function ChatPanel({
   pending,
   conversationId,
   modes,
+  voice = false,
 }: {
   title: string;
   kind: SourceKind;
@@ -47,10 +50,86 @@ export function ChatPanel({
   pending: React.ReactNode;
   conversationId: string | null;
   modes: Mode[];
+  /** The server can transcribe spoken questions. */
+  voice?: boolean;
 }) {
   const chat = useChat(conversationId);
   const bottom = useRef<HTMLDivElement>(null);
   const [activeId, setActiveId] = useState<ChatModeId>("qa");
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [readAloud, setReadAloud] = useState(false);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const speakerRef = useRef<Speaker | null>(null);
+  const speechOut = supportsSpeechOutput();
+  const voiceAvailable = voice && supportsSpeechInput();
+
+  // One speaker per panel for typed answers and the per-message buttons; the
+  // voice session owns its own so the two never talk over each other.
+  const speaker = useCallback(() => {
+    if (!speakerRef.current) {
+      speakerRef.current = new Speaker();
+      speakerRef.current.onChange((speaking) => {
+        if (!speaking) setSpeakingId(null);
+      });
+    }
+    return speakerRef.current;
+  }, []);
+
+  useEffect(() => {
+    try {
+      setReadAloud(localStorage.getItem(READ_ALOUD_KEY) === "1");
+    } catch {
+      /* no storage */
+    }
+    return () => speakerRef.current?.stop();
+  }, []);
+
+  function toggleReadAloud() {
+    const next = !readAloud;
+    setReadAloud(next);
+    if (!next) speaker().stop();
+    try {
+      localStorage.setItem(READ_ALOUD_KEY, next ? "1" : "0");
+    } catch {
+      /* no storage */
+    }
+  }
+
+  /** Typed questions: when read-aloud is on, speak the answer as it streams. */
+  const sendTyped = useCallback(
+    (text: string, mode: Mode) => {
+      if (!readAloud || !speechOut) return void chat.send(text, mode.id, mode.default_prompt);
+      const voiceOut = speaker();
+      voiceOut.stop();
+      voiceOut.setLanguage(languageTag(null, text));
+      setSpeakingId("live");
+      const onEvent = (event: ChatStreamEvent) => {
+        if (event.type === "token") voiceOut.feed(event.data);
+        else if (event.type === "done") {
+          voiceOut.setLanguage(languageTag(event.data.language, text));
+          voiceOut.flush();
+        } else if (event.type === "error") voiceOut.stop();
+      };
+      void chat.send(text, mode.id, mode.default_prompt, { spoken: true, onEvent });
+    },
+    [chat, readAloud, speechOut, speaker],
+  );
+
+  function speakMessage(message: ChatMessage) {
+    const voiceOut = speaker();
+    if (speakingId === message.id) {
+      voiceOut.stop();
+      return;
+    }
+    const question = [...chat.messages].reverse().find((m) => m.role === "user" && m.created_at <= message.created_at);
+    voiceOut.speakAll(message.content, languageTag(null, question?.content ?? message.content));
+    setSpeakingId(message.id);
+  }
+
+  function stopAll() {
+    speaker().stop();
+    chat.stop();
+  }
 
   const catalogue = useMemo(() => (modes.length ? modes : [QA]), [modes]);
   const active = useMemo(
@@ -132,20 +211,46 @@ export function ChatPanel({
             message={message}
             modes={catalogue}
             onRetry={index === chat.messages.length - 1 && message.error ? chat.retryLast : undefined}
+            onSpeak={speechOut && message.role === "assistant" ? speakMessage : undefined}
+            speaking={speakingId === message.id}
           />
         ))}
         <div ref={bottom} />
       </div>
 
       <div className="sticky bottom-0 space-y-2 bg-gradient-to-t from-slate-50 via-slate-50 pb-4 pt-2 dark:from-slate-950 dark:via-slate-950">
-        <ModeBar modes={catalogue} active={active.id} disabled={!live || chat.streaming} onSelect={selectMode} />
-        <Composer
-          mode={active}
-          disabled={!live}
-          streaming={chat.streaming}
-          onSend={(text) => void chat.send(text, active.id, active.default_prompt)}
-          onStop={chat.stop}
-        />
+        {voiceOpen && live ? (
+          <div className="flex min-h-[22rem] flex-col">
+            <VoiceSession
+              title={title}
+              mode={active}
+              sendVoice={(audio, onEvent) => chat.sendVoice(audio, active.id, { onEvent })}
+              stopAnswer={chat.stop}
+              onClose={() => {
+                chat.stop();
+                setVoiceOpen(false);
+              }}
+            />
+          </div>
+        ) : (
+          <>
+            <ModeBar modes={catalogue} active={active.id} disabled={!live || chat.streaming} onSelect={selectMode} />
+            <Composer
+              mode={active}
+              disabled={!live}
+              streaming={chat.streaming}
+              onSend={(text) => sendTyped(text, active)}
+              onStop={stopAll}
+              voiceAvailable={voiceAvailable}
+              onVoice={() => {
+                speaker().stop();
+                setVoiceOpen(true);
+              }}
+              readAloud={readAloud}
+              onToggleReadAloud={speechOut ? toggleReadAloud : undefined}
+            />
+          </>
+        )}
         <p className="flex items-center justify-center gap-2 text-center text-[11px] text-slate-400">
           {currentModel && (
             <span
@@ -157,9 +262,11 @@ export function ChatPanel({
             </span>
           )}
           <span>
-            {active.needs_input
-              ? "Enter to send · Shift+Enter for a new line"
-              : `${active.description} Press Run, or add an instruction first.`}
+            {voiceOpen
+              ? "Speak naturally. Pause, and the answer is read back to you."
+              : active.needs_input
+                ? `Enter to send · Shift+Enter for a new line${voiceAvailable ? " · mic to talk" : ""}`
+                : `${active.description} Press Run, or add an instruction first.`}
           </span>
         </p>
       </div>

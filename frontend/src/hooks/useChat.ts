@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, ApiError } from "@/lib/api/client";
-import type { ChatModeId, Citation, Message } from "@/lib/api/types";
+import type { ChatModeId, ChatStreamEvent, Citation, Message } from "@/lib/api/types";
 
 export interface ChatMessage extends Message {
   /** True while the assistant answer is still streaming. */
@@ -12,6 +12,8 @@ export interface ChatMessage extends Message {
   progress?: string | null;
   /** Error text when the answer could not be produced. */
   error?: string | null;
+  /** The question arrived by voice. */
+  spoken?: boolean;
 }
 
 interface ChatState {
@@ -19,6 +21,13 @@ interface ChatState {
   loading: boolean;
   streaming: boolean;
   error: string | null;
+}
+
+export interface SendOptions {
+  /** Ask for an answer written to be read aloud. */
+  spoken?: boolean;
+  /** Observe every stream event, for example to speak tokens as they arrive. */
+  onEvent?: (event: ChatStreamEvent) => void;
 }
 
 let tempCounter = 0;
@@ -52,15 +61,20 @@ export function useChat(conversationId: string | null) {
     [],
   );
 
-  const send = useCallback(
-    async (content: string, mode: ChatModeId = "qa", displayPrompt?: string) => {
-      const text = content.trim();
+  /** Shared by typed and spoken turns: optimistic bubbles, then the event stream. */
+  const run = useCallback(
+    async (
+      shown: string,
+      mode: ChatModeId,
+      spoken: boolean,
+      start: (signal: AbortSignal) => AsyncGenerator<ChatStreamEvent>,
+      onEvent?: (event: ChatStreamEvent) => void,
+    ) => {
       if (!conversationId || abortRef.current) return;
 
       const userId = tempId("usr");
       const assistantId = tempId("ast");
       const now = new Date().toISOString();
-      const shown = text || displayPrompt || "Run";
       const base = { conversation_id: conversationId, model: null, mode, citations: [] as Citation[], created_at: now };
 
       setState((s) => ({
@@ -69,7 +83,7 @@ export function useChat(conversationId: string | null) {
         error: null,
         messages: [
           ...s.messages,
-          { ...base, id: userId, role: "user" as const, content: shown },
+          { ...base, id: userId, role: "user" as const, content: shown, spoken },
           { ...base, id: assistantId, role: "assistant" as const, content: "", streaming: true },
         ],
       }));
@@ -79,12 +93,16 @@ export function useChat(conversationId: string | null) {
       let failed = false;
 
       try {
-        for await (const event of api.conversations.send(conversationId, text, mode, controller.signal)) {
+        for await (const event of start(controller.signal)) {
           // Cancelling the stream resolves pending reads rather than throwing,
           // so without this check already-buffered tokens keep being appended
           // for a moment after Stop is pressed.
           if (controller.signal.aborted) break;
+          onEvent?.(event);
           switch (event.type) {
+            case "transcript":
+              patch(userId, { content: event.data.text });
+              break;
             case "citations":
               patch(assistantId, { citations: event.data });
               break;
@@ -143,6 +161,31 @@ export function useChat(conversationId: string | null) {
     [conversationId, patch],
   );
 
+  const send = useCallback(
+    async (content: string, mode: ChatModeId = "qa", displayPrompt?: string, options: SendOptions = {}) => {
+      const text = content.trim();
+      if (!conversationId) return;
+      const shown = text || displayPrompt || "Run";
+      await run(
+        shown,
+        mode,
+        false,
+        (signal) => api.conversations.send(conversationId, text, mode, signal, options.spoken ?? false),
+        options.onEvent,
+      );
+    },
+    [conversationId, run],
+  );
+
+  /** A spoken question. The bubble shows a placeholder until the transcript arrives. */
+  const sendVoice = useCallback(
+    async (audio: Blob, mode: ChatModeId = "qa", options: SendOptions = {}) => {
+      if (!conversationId) return;
+      await run("…", mode, true, (signal) => api.conversations.voice(conversationId, audio, mode, signal), options.onEvent);
+    },
+    [conversationId, run],
+  );
+
   const stop = useCallback(() => abortRef.current?.abort(), []);
 
   const retryLast = useCallback(async () => {
@@ -153,8 +196,8 @@ export function useChat(conversationId: string | null) {
       const index = s.messages.findIndex((m) => m.id === lastUser.id);
       return { ...s, messages: index === -1 ? s.messages : s.messages.slice(0, index) };
     });
-    await send(mode === "qa" ? lastUser.content : "", mode, lastUser.content);
+    await send(mode === "qa" ? lastUser.content : "", mode, lastUser.content, { spoken: lastUser.spoken });
   }, [state.messages, send]);
 
-  return { ...state, send, stop, retryLast };
+  return { ...state, send, sendVoice, stop, retryLast };
 }

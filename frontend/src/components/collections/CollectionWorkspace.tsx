@@ -24,7 +24,7 @@ export function CollectionWorkspace({ collectionId }: { collectionId: string }) 
   const router = useRouter();
   const { collection, notFound, error, addSource, removeSource, rename } = useCollection(collectionId);
   const { sources } = useSources();
-  const { modes } = useCatalogue();
+  const { modes, capabilities } = useCatalogue();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
 
@@ -177,6 +177,7 @@ export function CollectionWorkspace({ collectionId }: { collectionId: string }) 
             pending={<CollectionPendingNotice ready={collection.ready_count} total={collection.source_count} />}
             conversationId={conversation?.id ?? null}
             modes={modes}
+            voice={capabilities?.voice ?? false}
           />
         </div>
       </div>

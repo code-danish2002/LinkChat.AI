@@ -75,6 +75,20 @@ def language_reminder(question: str) -> str:
         "in this conversation.)"
     )
 
+#: Appended to the task instruction when the answer will be spoken by a
+#: text-to-speech voice. Lists, headings and long answers read badly aloud.
+SPOKEN_RULES = (
+    "The answer will be read aloud by a voice assistant, so write it to be heard: two to four short "
+    "plain sentences in natural spoken prose, no bullet points, headings, tables, code or Markdown "
+    "formatting. Keep the [n] citation markers, they are shown on screen and not spoken. If the user "
+    "asks for detail, give one more sentence, never a list."
+)
+
+
+def spoken(instruction: str) -> str:
+    return f"{instruction} {SPOKEN_RULES}"
+
+
 _CONDENSE_INSTRUCTION = (
     "Condense this part of a longer source into dense notes for a colleague who cannot see the "
     "original. Keep every specific: names, numbers, dates, prices, conclusions and terminology. "

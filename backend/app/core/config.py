@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     fetch_timeout_seconds: float = 25.0
     max_upload_bytes: int = 40 * 1024 * 1024
     max_audio_bytes: int = 24 * 1024 * 1024  # hosted Whisper endpoints cap around 25 MB
+    # A spoken question: 16 kHz mono WAV is 32 KB per second, so this is about
+    # three minutes, far beyond the ninety seconds the UI allows.
+    max_voice_bytes: int = 6 * 1024 * 1024
     max_document_chars: int = 2_000_000
     min_document_chars: int = 120
     chunk_size: int = Field(default=1000, ge=200)

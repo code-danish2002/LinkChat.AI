@@ -114,6 +114,8 @@ export interface Capabilities {
   audio_transcription: boolean;
   javascript_rendering: boolean;
   collections: boolean;
+  /** Spoken questions are accepted (needs a speech-to-text provider on the server). */
+  voice: boolean;
   upload_extensions: string[];
   max_upload_mb: number;
   /** "resend" means codes arrive by email; "console" means they are only logged on the server. */
@@ -136,12 +138,29 @@ export interface ApiErrorBody {
   error: { code: string; message: string; details?: Record<string, unknown> };
 }
 
+export interface Transcript {
+  text: string;
+  language: string | null;
+  duration_seconds: number | null;
+}
+
 export type ChatStreamEvent =
+  | { type: "transcript"; data: Transcript }
   | { type: "citations"; data: Citation[] }
   | { type: "progress"; data: string }
   | { type: "model"; data: string }
   | { type: "token"; data: string }
-  | { type: "done"; data: { user_message_id: string; assistant_message_id: string; model: string | null; mode: ChatModeId } }
+  | {
+      type: "done";
+      data: {
+        user_message_id: string;
+        assistant_message_id: string;
+        model: string | null;
+        mode: ChatModeId;
+        /** Language name of the question ("Hindi"), for picking a voice; null when unsure. */
+        language: string | null;
+      };
+    }
   | { type: "error"; data: string };
 
 export interface User {

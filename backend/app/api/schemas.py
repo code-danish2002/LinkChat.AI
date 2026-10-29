@@ -228,6 +228,8 @@ class MessageResponse(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str = Field(default="", max_length=4000)
     mode: ChatMode = ChatMode.QA
+    #: The answer will be read aloud, so it is written as short spoken prose.
+    spoken: bool = False
 
 
 class ModeResponse(BaseModel):
@@ -285,6 +287,8 @@ class CapabilitiesResponse(BaseModel):
     audio_transcription: bool
     javascript_rendering: bool
     collections: bool
+    #: Spoken questions through the voice endpoint; needs the same provider as audio transcription.
+    voice: bool
     upload_extensions: list[str]
     max_upload_mb: int
     #: How login codes are delivered: "resend" means real email, "console" means the server log.

@@ -24,6 +24,7 @@ def _capabilities(container: Container) -> CapabilitiesResponse:
         audio_transcription=bool(container.transcriber and container.transcriber.available),
         javascript_rendering=renderer is not None and renderer.unavailable_reason is None,
         collections=True,
+        voice=container.chat.voice_available,
         upload_extensions=list(SUPPORTED_UPLOAD_EXTENSIONS),
         max_upload_mb=container.settings.max_upload_bytes // (1024 * 1024),
         email_login=container.auth.email_provider,

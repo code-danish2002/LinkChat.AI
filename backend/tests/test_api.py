@@ -99,6 +99,8 @@ def harness(tmp_path, monkeypatch):
             retrieval=retrieval,
             documents=document_service,
             router=router,
+            transcriber=FakeTranscriber(),
+            max_voice_bytes=1024,
         )
         auth = AuthService(
             identity_repo, email, secret="test-secret", guest_ttl=timedelta(hours=24), reveal_codes=True
@@ -153,17 +155,33 @@ def add_source(client, url="https://example.com/page", headers=None):
     return wait_ready(client, created.json()["id"], headers)
 
 
-def stream(client, conversation_id, content="", mode="qa", headers=None):
+def stream(client, conversation_id, content="", mode="qa", headers=None, spoken=False):
     """Send a message and collect the SSE events by name."""
     with client.stream(
         "POST",
         f"/api/v1/conversations/{conversation_id}/messages",
-        json={"content": content, "mode": mode},
+        json={"content": content, "mode": mode, "spoken": spoken},
         headers=headers,
     ) as response:
         assert response.headers["content-type"].startswith("text/event-stream")
         lines = [line for line in "".join(response.iter_text()).splitlines() if line]
+    return parse_sse(lines)
 
+
+def speak(client, conversation_id, audio=b"RIFF-fake-wav-bytes", mode="qa", filename="question.wav"):
+    """Send a spoken question and collect the SSE events by name."""
+    with client.stream(
+        "POST",
+        f"/api/v1/conversations/{conversation_id}/voice",
+        files={"audio": (filename, audio, "audio/wav")},
+        data={"mode": mode},
+    ) as response:
+        assert response.headers["content-type"].startswith("text/event-stream"), response.read()
+        lines = [line for line in "".join(response.iter_text()).splitlines() if line]
+    return parse_sse(lines)
+
+
+def parse_sse(lines):
     events: dict[str, list] = {}
     for index, line in enumerate(lines):
         if line.startswith("event:"):
@@ -659,3 +677,73 @@ def test_ingestion_is_queued_rather_than_started_all_at_once(harness):
         wait_ready(client, response.json()["id"])
     statuses = [client.get(f"/api/v1/sources/{r.json()['id']}").json()["status"] for r in accepted]
     assert statuses == ["ready"] * burst, "queueing must not drop any of them"
+
+
+# ---------------------------------------------------------------- voice
+
+
+def test_health_advertises_voice(client):
+    assert client.get("/api/v1/health").json()["capabilities"]["voice"] is True
+
+
+def test_spoken_question_is_transcribed_then_answered_for_the_ear(harness):
+    client, llm = harness
+    source = add_source(client)
+    conversation = client.post("/api/v1/conversations", json={"source_id": source["id"]}).json()
+
+    events = speak(client, conversation["id"])
+    heard = events["transcript"][0]
+    assert heard["text"].startswith("spoken line 0 about the subject spoken line 1")
+    assert heard["language"] == "en"
+    assert events["citations"] and events["token"], "the transcript was answered like a typed question"
+    assert events["done"][0]["language"] == "English"
+
+    # the model was told the answer will be read aloud
+    assert "read aloud" in llm.calls[-1]["system"]
+    assert "no bullet points" in llm.calls[-1]["system"]
+
+    # the spoken words were persisted as the user's turn
+    messages = client.get(f"/api/v1/conversations/{conversation['id']}/messages").json()
+    assert messages[0]["role"] == "user" and messages[0]["content"] == heard["text"]
+    assert messages[1]["role"] == "assistant"
+
+
+def test_typed_question_can_ask_for_a_spoken_answer(harness):
+    client, llm = harness
+    source = add_source(client)
+    conversation = client.post("/api/v1/conversations", json={"source_id": source["id"]}).json()
+    stream(client, conversation["id"], "What is fact 1?", spoken=True)
+    assert "read aloud" in llm.calls[-1]["system"]
+    stream(client, conversation["id"], "What is fact 2?")
+    assert "read aloud" not in llm.calls[-1]["system"]
+
+
+def test_voice_rejects_empty_and_oversized_recordings(client):
+    source = add_source(client)
+    conversation = client.post("/api/v1/conversations", json={"source_id": source["id"]}).json()
+    assert "error" in speak(client, conversation["id"], audio=b"")
+    too_big = speak(client, conversation["id"], audio=b"x" * 2048)
+    assert "capped" in too_big["error"][0]
+    assert "transcript" not in too_big
+
+
+def test_voice_is_refused_for_someone_elses_conversation(client):
+    source = add_source(client)
+    conversation = client.post("/api/v1/conversations", json={"source_id": source["id"]}).json()
+    response = client.post(
+        f"/api/v1/conversations/{conversation['id']}/voice",
+        files={"audio": ("q.wav", b"RIFF", "audio/wav")},
+        headers=as_guest(GUEST_B),
+    )
+    assert response.status_code == 404
+
+
+def test_voice_needs_a_transcriber(client):
+    client.app.state.container.chat._transcriber = FakeTranscriber(available=False)
+    assert client.get("/api/v1/health").json()["capabilities"]["voice"] is False
+    source = add_source(client)
+    conversation = client.post("/api/v1/conversations", json={"source_id": source["id"]}).json()
+    response = client.post(
+        f"/api/v1/conversations/{conversation['id']}/voice", files={"audio": ("q.wav", b"RIFF", "audio/wav")}
+    )
+    assert response.status_code == 422 and "GROQ_API_KEY" in response.json()["error"]["message"]

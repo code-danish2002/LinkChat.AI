@@ -4,7 +4,8 @@ export type IconName =
   | "link" | "youtube" | "globe" | "file" | "send" | "stop" | "trash" | "refresh" | "check"
   | "alert" | "spinner" | "chevron" | "sparkles" | "clock" | "external" | "plus" | "quote"
   | "mic" | "table" | "presentation" | "book" | "upload" | "layers" | "close" | "list"
-  | "wand" | "cards" | "help" | "shield" | "pen" | "language" | "target";
+  | "wand" | "cards" | "help" | "shield" | "pen" | "language" | "target"
+  | "speaker" | "speakerOff" | "micOff" | "waveform";
 
 const paths: Record<IconName, React.ReactNode> = {
   link: <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />,
@@ -39,6 +40,10 @@ const paths: Record<IconName, React.ReactNode> = {
   pen: <path d="M17 3a2.8 2.8 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5z" />,
   language: <path d="m5 8 6 6M4 14l6-6 2-3M2 5h12M7 2h1M22 22l-5-10-5 10M14 18h6" />,
   target: <><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle cx="12" cy="12" r="2" /></>,
+  speaker: <><path d="M11 5 6 9H2v6h4l5 4z" /><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14" /></>,
+  speakerOff: <><path d="M11 5 6 9H2v6h4l5 4z" /><path d="m23 9-6 6M17 9l6 6" /></>,
+  micOff: <><path d="m2 2 20 20M9 9v3a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.9-.7" /><path d="M17 16.9A7 7 0 0 1 5 12v-2M19 10v2a7 7 0 0 1-.1 1.2M12 19v3M8 22h8" /></>,
+  waveform: <path d="M2 12h2M6 8v8M10 4v16M14 7v10M18 10v4M22 12h0" />,
 };
 
 export function Icon({ name, className = "h-4 w-4", ...rest }: { name: IconName } & SVGProps<SVGSVGElement>) {

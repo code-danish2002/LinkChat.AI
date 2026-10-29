@@ -69,6 +69,18 @@ password, set on Render: `EMAIL_PROVIDER=smtp`, `SMTP_HOST=smtp.gmail.com`,
 `SMTP_PORT=587`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `EMAIL_FROM`. Until then
 guests work in production but sign-in codes only reach the Render log.
 
+## Voice (implemented 2026-10-29)
+
+Hands-free conversation in the browser, free. `POST /conversations/{id}/voice`
+takes a WAV from the browser's Silero VAD (`@ricky0123/vad-web`, model files
+loaded from jsdelivr; versions pinned exactly in `frontend/package.json`
+because the wasm CDN path must match), transcribes with the existing Whisper
+transcriber, emits a `transcript` event, then answers with `spoken_answer=True`
+(short spoken prose, citations kept). `frontend/src/lib/speech.ts` holds the
+WAV encoder, the sentence-streaming `Speaker` over browser speech synthesis,
+and language-to-voice selection; `VoiceSession.tsx` is the UI with barge-in.
+Not built: realtime speech-to-speech (paid), phone numbers (Twilio, paid).
+
 ## Known limits and the next agreed step
 
 - **YouTube captions fail from every datacenter IP** (Render included);
@@ -107,6 +119,7 @@ behaviour changes.
 
 ## Session history
 
+- 2026-10-29: added the voice conversation (mic in the composer, read-aloud on answers), SMTP login-code sender, CLAUDE.md.
 - 2026-10-25: moved from SQLite + local files to Neon Postgres; added shared
   documents, guest/user identity, email-code login, SMTP/Resend senders,
   maintenance job, frontend auth UI. Verified end to end against Neon with a

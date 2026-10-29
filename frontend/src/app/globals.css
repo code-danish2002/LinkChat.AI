@@ -34,3 +34,32 @@ body {
 }
 .typing-dot:nth-child(2) { animation-delay: 0.15s; }
 .typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+/* Voice session orb */
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgb(99 102 241 / 0.35); }
+  50% { transform: scale(1.06); box-shadow: 0 0 0 18px rgb(99 102 241 / 0); }
+}
+@keyframes orb-think {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+@keyframes orb-talk {
+  0%, 100% { transform: scaleY(0.4); }
+  50% { transform: scaleY(1); }
+}
+.orb-listening { animation: orb-breathe 2.2s ease-in-out infinite; }
+.orb-thinking::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  border-top-color: rgb(99 102 241);
+  animation: orb-think 0.9s linear infinite;
+}
+.orb-bar { animation: orb-talk 0.9s ease-in-out infinite; transform-origin: center; }
+.orb-bar:nth-child(2) { animation-delay: 0.12s; }
+.orb-bar:nth-child(3) { animation-delay: 0.24s; }
+.orb-bar:nth-child(4) { animation-delay: 0.36s; }
+.orb-bar:nth-child(5) { animation-delay: 0.48s; }

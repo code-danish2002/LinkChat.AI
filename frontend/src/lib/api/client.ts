@@ -79,6 +79,33 @@ async function toApiError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, "http_error", `Request failed with HTTP ${response.status}.`);
 }
 
+async function* streamEvents(
+  path: string,
+  init: { headers?: Record<string, string>; body: BodyInit },
+  signal?: AbortSignal,
+): AsyncGenerator<ChatStreamEvent> {
+  let response: Response;
+  try {
+    response = await fetch(`${API}${path}`, {
+      method: "POST",
+      headers: { Accept: "text/event-stream", ...authHeaders(), ...(init.headers ?? {}) },
+      body: init.body,
+      signal,
+    });
+  } catch (error) {
+    if ((error as Error).name === "AbortError") return;
+    throw unreachable();
+  }
+  if (!response.ok) {
+    const error = await toApiError(response);
+    expireSession(error);
+    throw error;
+  }
+  for await (const message of readSse(response, signal)) {
+    yield { type: message.event, data: JSON.parse(message.data) } as ChatStreamEvent;
+  }
+}
+
 export const api = {
   health: () => request<Health>("/health"),
   models: () => request<ModelPool>("/models"),
@@ -136,28 +163,23 @@ export const api = {
     messages: (id: string) => request<Message[]>(`/conversations/${encodeURIComponent(id)}/messages`),
 
     /** Send a message and stream the answer back as typed events. */
-    async *send(id: string, content: string, mode: ChatModeId, signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
-      let response: Response;
-      try {
-        response = await fetch(`${API}/conversations/${encodeURIComponent(id)}/messages`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeaders() },
-          body: JSON.stringify({ content, mode }),
-          signal,
-        });
-      } catch (error) {
-        if ((error as Error).name === "AbortError") return;
-        throw unreachable();
-      }
-      if (!response.ok) {
-        const error = await toApiError(response);
-        expireSession(error);
-        throw error;
-      }
+    send(id: string, content: string, mode: ChatModeId, signal?: AbortSignal, spoken = false) {
+      return streamEvents(
+        `/conversations/${encodeURIComponent(id)}/messages`,
+        {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content, mode, spoken }),
+        },
+        signal,
+      );
+    },
 
-      for await (const message of readSse(response, signal)) {
-        yield { type: message.event, data: JSON.parse(message.data) } as ChatStreamEvent;
-      }
+    /** Send a spoken question as audio; the first event is the transcript. */
+    voice(id: string, audio: Blob, mode: ChatModeId, signal?: AbortSignal) {
+      const form = new FormData();
+      form.append("audio", audio, audio.type.includes("wav") ? "question.wav" : "question.webm");
+      form.append("mode", mode);
+      return streamEvents(`/conversations/${encodeURIComponent(id)}/voice`, { body: form }, signal);
     },
   },
 };

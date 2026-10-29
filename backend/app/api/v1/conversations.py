@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
 from app.api.deps import get_chat, get_principal
 from app.api.schemas import (
@@ -10,8 +10,8 @@ from app.api.schemas import (
     SendMessageRequest,
 )
 from app.api.sse import format_event, sse_response
-from app.core.exceptions import AppError
-from app.domain.models import Principal
+from app.core.exceptions import AppError, ValidationError
+from app.domain.models import ChatMode, Principal
 from app.services.chat_service import ChatService
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -76,7 +76,38 @@ async def send_message(
 
     async def generate():
         try:
-            async for event in chat.stream_answer(principal.owner_id, conversation.id, body.content, body.mode):
+            async for event in chat.stream_answer(
+                principal.owner_id, conversation.id, body.content, body.mode, spoken_answer=body.spoken
+            ):
+                yield format_event(event.type, event.data)
+        except AppError as exc:
+            yield format_event("error", exc.message)
+
+    return sse_response(generate())
+
+
+@router.post("/{conversation_id}/voice")
+async def send_voice_message(
+    conversation_id: str,
+    audio: UploadFile = File(...),
+    mode: ChatMode = Form(default=ChatMode.QA),
+    principal: Principal = Depends(get_principal),
+    chat: ChatService = Depends(get_chat),
+):
+    """A spoken question. Multipart `audio` (WAV, WebM, MP4, MP3...), optional `mode`.
+
+    Streams the same events as a typed message, preceded by `transcript`
+    carrying what was heard. The answer is written to be read aloud.
+    """
+    conversation = await chat.get_conversation(principal.owner_id, conversation_id)
+    if not chat.voice_available:
+        raise ValidationError("Voice needs a speech-to-text provider. Set GROQ_API_KEY to enable Whisper.")
+    payload = await audio.read()
+    filename = audio.filename or "question.wav"
+
+    async def generate():
+        try:
+            async for event in chat.stream_voice_answer(principal.owner_id, conversation.id, payload, filename, mode):
                 yield format_event(event.type, event.data)
         except AppError as exc:
             yield format_event("error", exc.message)

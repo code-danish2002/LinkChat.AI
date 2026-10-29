@@ -84,7 +84,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     def _bucket(self, request: Request) -> tuple[SlidingWindow, str]:
         path, method = request.url.path, request.method
-        if method == "POST" and path.endswith("/messages"):
+        if method == "POST" and path.endswith(("/messages", "/voice")):
             return self._chat, "chat"
         if method == "POST" and (path == "/api/v1/sources" or path.endswith("/sources/upload")):
             return self._ingest, "ingest"
