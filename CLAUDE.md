@@ -78,7 +78,11 @@ because the wasm CDN path must match), transcribes with the existing Whisper
 transcriber, emits a `transcript` event, then answers with `spoken_answer=True`
 (short spoken prose, citations kept). `frontend/src/lib/speech.ts` holds the
 WAV encoder, the sentence-streaming `Speaker` over browser speech synthesis,
-and language-to-voice selection; `VoiceSession.tsx` is the UI with barge-in.
+and language-to-voice selection; `VoiceSession.tsx` is the UI. **Echo rule:** the mic
+is paused while the answer is spoken and for 700 ms after (first live test on
+speakers had the app transcribing its own voice, looping fragments and answering
+in Chinese); barge-in is opt-in for headphones. `backend/app/services/transcript.py`
+collapses repeated fragments and drops Whisper's stock hallucinations.
 Not built: realtime speech-to-speech (paid), phone numbers (Twilio, paid).
 
 ## Known limits and the next agreed step

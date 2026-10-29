@@ -41,6 +41,28 @@ export function encodeWav(samples: Float32Array, sampleRate = VOICE_SAMPLE_RATE)
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+/**
+ * Drop silence from both ends of an utterance, keeping a short pad. The voice
+ * detector hands back its pre-speech padding and the silence that ended the
+ * sentence; Whisper tends to invent words over long silences.
+ */
+export function trimSilence(samples: Float32Array, sampleRate = VOICE_SAMPLE_RATE, threshold = 0.015): Float32Array {
+  const frame = Math.floor(sampleRate / 50); // 20 ms
+  const pad = Math.floor(sampleRate * 0.15);
+  let first = -1;
+  let last = -1;
+  for (let start = 0; start + frame <= samples.length; start += frame) {
+    let energy = 0;
+    for (let i = start; i < start + frame; i++) energy += samples[i] * samples[i];
+    if (Math.sqrt(energy / frame) > threshold) {
+      if (first === -1) first = start;
+      last = start + frame;
+    }
+  }
+  if (first === -1) return new Float32Array(0);
+  return samples.subarray(Math.max(0, first - pad), Math.min(samples.length, last + pad));
+}
+
 export function supportsSpeechOutput(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
 }

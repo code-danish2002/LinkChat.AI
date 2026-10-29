@@ -228,7 +228,7 @@ stop talking and sends that utterance as audio; the server transcribes it with
 the same Whisper step that reads uploaded recordings, answers from the source
 as usual, and the answer is spoken sentence by sentence while it is still
 streaming, so the first words are heard about two seconds after you fall
-silent. Talking over the answer stops it and starts a new turn. Spoken answers
+silent. The microphone is off while the answer plays and for a moment afterwards, so the app never hears its own voice; "Interrupt by speaking" turns it back on for headphone users. Spoken answers
 are written for the ear (two to four plain sentences, no lists) but keep their
 citations, which stay on screen and in the saved chat. Every answer also has a
 "Read aloud" button, and a speaker toggle reads typed answers as they arrive.
@@ -470,7 +470,7 @@ The suite never touches the network. It uses deterministic fake embeddings, scri
 
 ## Notes and limits
 
-- **Voice is a pipeline, not a realtime model.** Speech is transcribed, answered and spoken as three steps, so a reply starts about two to three seconds after you stop talking. A sub-second, interruptible-mid-word experience needs a paid speech-to-speech model. The browser's voices are clear but not human-sounding. On laptop speakers the detector can hear the answer and interrupt itself; the session has a switch to turn barge-in off, and headphones avoid it entirely.
+- **Voice is a pipeline, not a realtime model.** Speech is transcribed, answered and spoken as three steps, so a reply starts about two to three seconds after you stop talking. A sub-second, interruptible-mid-word experience needs a paid speech-to-speech model. The browser's voices are clear but not human-sounding. Whisper on poor audio repeats fragments or invents stock phrases, so transcripts are cleaned (immediate repeats collapsed, known hallucinations treated as silence) before they become a question.
 - **Guests are a browser, not a person.** Clearing site data, a private window or another device is a new guest with nothing in it, and the old guest's sources vanish after a day. Signing in is what makes a library follow a person.
 - **Single process.** Rate-limit counters, circuit breakers and the "already ingesting" set live in memory, so run one backend instance. The database is shared, so a second instance would work but double-count nothing and double-ingest occasionally.
 - **YouTube blocks caption requests from many data-centre IP ranges.** Run the backend from a home network for YouTube sources.

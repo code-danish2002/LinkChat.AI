@@ -44,6 +44,7 @@ from app.services.language import detect_language
 from app.services.modes import ModeSpec, get_mode
 from app.services.prompts import build_retrieval_messages, format_timestamp, spoken
 from app.services.retrieval_service import RetrievalService
+from app.services.transcript import clean_transcript
 
 log = logging.getLogger(__name__)
 
@@ -216,7 +217,8 @@ class ChatService:
         except IngestionError as exc:
             yield StreamEvent("error", f"I could not transcribe that. {exc.message}")
             return
-        text = " ".join(" ".join(segment.text.split()) for segment in segments if segment.text.strip()).strip()
+        heard = " ".join(" ".join(segment.text.split()) for segment in segments if segment.text.strip()).strip()
+        text = clean_transcript(heard)
         if not text:
             yield StreamEvent("error", "I did not catch anything. Try speaking a little closer to the microphone.")
             return
